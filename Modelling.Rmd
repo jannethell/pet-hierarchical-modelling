@@ -1,0 +1,3511 @@
+---
+title: "Modelling"
+author: "Jan-Erik Thell"
+date: "2025-05-30"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(kinfitr)
+library(bloodstream)
+library(furrr)
+library(brms)
+```
+
+
+# Demographics
+
+
+
+
+
+# Blood processing
+
+## bloodstream
+
+```{r, EVAL = false}
+remotes::install_github("mathesong/bloodstream")
+```
+
+
+
+### KIH12001
+```{r, eval=FALSE}
+studypath <- "/home/jan-erik/Repositories/BIDS/KIH12001"
+
+bloodstream(studypath, 
+            configpath = "/home/jan-erik/Repositories/BIDS/KIH12001/code/bloodstream/config_2025-05-08_id-jtjH.json")
+
+# And fix units!
+
+autoblood <- list.files(studypath, recursive=T, pattern="autosampler_blood.tsv", full.names = T)
+manblood <- list.files(studypath, recursive=T, pattern="manual_blood.tsv", full.names = T)
+
+fixmanblood <- function(filename) {
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(manblood)) {
+  print(i)
+  fixmanblood(manblood[i])
+}
+
+
+fixautoblood <- function(filename) {
+  
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  # dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(autoblood)) {
+  print(i)
+  fixautoblood(autoblood[i])
+}
+```
+
+
+### KIH11004
+
+```{r, eval=FALSE}
+studypath <- "/home/jan-erik/Repositories/BIDS/KIH11004"
+
+bloodstream(studypath, 
+            configpath = "/home/jan-erik/Repositories/BIDS/KIH11004/code/bloodstream/config_2025-05-08_id-jtjH.json")
+
+# And fix units!
+
+autoblood <- list.files(studypath, recursive=T, pattern="autosampler_blood.tsv", full.names = T)
+manblood <- list.files(studypath, recursive=T, pattern="manual_blood.tsv", full.names = T)
+
+fixmanblood <- function(filename) {
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(manblood)) {
+  print(i)
+  fixmanblood(manblood[i])
+}
+
+
+fixautoblood <- function(filename) {
+  
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  # dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(autoblood)) {
+  print(i)
+  fixautoblood(autoblood[i])
+}
+```
+
+
+
+# Load the processed blood data
+
+
+```{r}
+inputs_kih12001 <- bloodstream_import_inputfunctions("/home/jan-erik/Repositories/BIDS/KIH12001/derivatives/bloodstream2025-05-08_id-jtjH/") %>% 
+  select(-measurement) %>% 
+  mutate(study = "KIH12001")
+
+map(inputs_kih12001$input[1:4], plot)
+
+
+inputs_kih11004 <- bloodstream_import_inputfunctions("/home/jan-erik/Repositories/BIDS/KIH11004/derivatives/bloodstream2025-05-08_id-jtjH/") %>% 
+  select(-measurement)%>% 
+  mutate(study = "KIH11004")
+
+map(inputs_kih11004$input[1:4], plot) 
+```
+
+
+```{r}
+inputs <- bind_rows(
+  inputs_kih11004,
+  inputs_kih12001
+)
+```
+
+
+
+
+```{r, fig.height=12, fig.width=12}
+inputs %>% 
+  mutate(PET = paste(sub, ses, study)) %>% 
+  unnest(input) %>% 
+  ggplot(aes(x = Time, y = AIF, colour = PET)) +
+  geom_line() +
+  facet_wrap(~PET) +
+  guides(colour = "none")
+
+```
+
+
+
+#Read TAC Data
+```{r}
+# Hämta alla relevanta .tsv-filer i sub-*/ses-*/ med full path
+petprep_tac_data_kih12001 <- list.files(
+  path = "/home/jan-erik/Repositories/BIDS/KIH12001/derivatives/petprep_extract_tacs",
+  pattern = "\\.tsv$", recursive = TRUE, full.names = TRUE
+) %>%
+  enframe(name = NULL, value = "path_absolute") %>%
+  mutate(
+    filename = basename(path_absolute),
+    sub = str_match(filename, "sub-(\\d*)")[,2],
+    ses = str_match(filename, "ses-(\\d*)")[,2],
+    extension = "tsv",
+    measurement = case_when(
+      str_detect(filename, "tacs") ~ "tacs",
+      str_detect(filename, "morph") ~ "morph",
+      str_detect(filename, "dseg") ~ "dseg",
+      TRUE ~ NA_character_
+    ),
+    desc = str_extract(filename, "(?<=desc-)[^-_]+")
+  ) %>%
+  filter(!is.na(measurement)) %>% 
+  mutate(study = "KIH12001") %>%
+  filter(
+    !(sub == "58" & ses == "1" & study == "KIH12001"),
+    !(sub == "32" & ses == "1" & study == "KIH12001")
+  )
+
+
+petprep_tac_data_kih11004 <- list.files(
+  path = "/home/jan-erik/Repositories/BIDS/KIH11004/derivatives/petprep_extract_tacs",
+  pattern = "\\.tsv$", recursive = TRUE, full.names = TRUE
+) %>%
+  enframe(name = NULL, value = "path_absolute") %>%
+  mutate(
+    filename = basename(path_absolute),
+    sub = str_match(filename, "sub-(\\d*)")[,2],
+    ses = str_match(filename, "ses-(\\d*)")[,2],
+    extension = "tsv",
+    measurement = case_when(
+      str_detect(filename, "tacs") ~ "tacs",
+      str_detect(filename, "morph") ~ "morph",
+      str_detect(filename, "dseg") ~ "dseg",
+      TRUE ~ NA_character_
+    ),
+    desc = str_extract(filename, "(?<=desc-)[^-_]+")
+  ) %>%
+  filter(!is.na(measurement)) %>% 
+  mutate(study = "KIH11004") %>%
+  filter(!(sub == "20" & ses == "1" & study == "KIH11004"))
+
+
+petprep_data <- bind_rows(petprep_tac_data_kih11004, petprep_tac_data_kih12001)
+```
+
+
+## Exclusions
+
+petprep_extract_tacs failed to coregister properly for sub-58 (HAB). Therefore removed. (comments: "tPl<pPl")
+20_1_KIH11004 bad correg
+
+
+```{r}
+
+# Läs in tacs
+tacs <- petprep_data %>%
+  filter(measurement == "tacs") %>%
+  mutate(tacdata = map(path_absolute, ~read_delim(.x, delim = "\t", show_col_types = FALSE)))
+
+# Läs in morph
+morphdata <- petprep_data %>%
+  filter(measurement == "morph") %>%
+  mutate(morphdata = map(path_absolute, ~read_delim(.x, delim = "\t", show_col_types = FALSE)))
+
+# Läs in dseg
+dsegdata <- petprep_data %>%
+  filter(measurement == "dseg") %>%
+  mutate(dsegdata = map(path_absolute, ~read_delim(.x, delim = "\t", show_col_types = FALSE))) 
+```
+
+
+
+#Prepare the TAC data
+##(ROI Combination)
+```{r}
+Frontal_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "frontal|triangularis|orbitalis")) %>% 
+  pull(name)
+
+Temporal_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "temporal|fusiform|entorhinal")) %>% 
+  pull(name)
+
+
+Parietal_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "parietal|precuneus|supramarginal")) %>% 
+  pull(name)
+                        
+Occipital_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "occipital|cuneus|lingual|pericalcarine")) %>% 
+  pull(name)
+  
+Amygdala_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Amygdala")) %>% 
+  pull(name)
+  
+Hippocampus_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Hippocampus")) %>% 
+  pull(name)
+
+Thalamus_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Thalamus")) %>% 
+  pull(name)
+
+Putamen_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Putamen")) %>% 
+  pull(name)
+
+  
+Caudate_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Caudate")) %>% 
+  pull(name)
+
+Accumbens_roinames <- morphdata$morphdata[[1]] %>% 
+  filter(str_detect(name, "Accumbens")) %>% 
+  pull(name)
+
+regions_list <- list(
+  Frontal = Frontal_roinames,
+  Temporal = Temporal_roinames,
+  Parietal = Parietal_roinames,
+  Occipital = Occipital_roinames,
+  Amygdala = Amygdala_roinames,
+  Hippocampus = Hippocampus_roinames,
+  Thalamus = Thalamus_roinames,
+  Putamen = Putamen_roinames,
+  Caudate = Caudate_roinames,
+  Accumbens = Accumbens_roinames
+)
+ 
+
+regions_list 
+
+# region for the whole brain for use in weighting
+all_roinames <- dsegdata$dsegdata[[1]]$name
+
+regions_list$WholeBrain <- all_roinames
+
+
+
+
+# function to make volume-weighted ROI TACs, first for one, and then for all of the regions.
+volume_weighted_average_tac <- function(tacdata, regions, regionname) {
+  
+  tacdata_combined <- tacdata %>% 
+    filter(name %in% regions) %>% 
+    group_by(frame_start, frame_end) %>% 
+    mutate(volume_tot = sum(`volume-mm3`),
+           volume_frac = `volume-mm3` / volume_tot,
+           TAC_frac = TAC * volume_frac) %>% 
+    summarise(!!regionname := sum(TAC_frac), 
+              .groups = "keep") %>% 
+    ungroup()
+  
+  return(tacdata_combined)
+  
+}
+
+volume_weighted_average_tacs <- function(tacdata, regions_list) {
+  
+  regionnames <- names(regions_list)
+  
+  out <- map2(regions_list, regionnames, ~volume_weighted_average_tac(tacdata, .x, .y))
+  
+  out <- purrr::reduce(out, dplyr::inner_join, by = c("frame_start",
+                                                      "frame_end"))
+  
+  return(out)
+}
+
+# First I’ll combine the morphology and TAC information.
+selected_tacs <- select(tacs, c(sub, ses, study, tacdata)) %>% 
+  inner_join(select(morphdata, c(sub, ses, study, morphdata))) %>% 
+  group_by(sub, ses, study) %>% 
+  mutate(tacdata = map(tacdata, ~pivot_longer(.x, 
+                                              cols = all_of(all_roinames), 
+                                              names_to = "name", values_to = "TAC"))) %>% 
+  mutate(tacdata = map2(tacdata, morphdata, ~inner_join(.x, .y, by="name")))
+
+# perform the weighted averaging
+selected_tacs <- selected_tacs %>% 
+  group_by(sub, ses, study) %>% 
+  mutate(selected_tacdata = map(tacdata, ~volume_weighted_average_tacs(.x, 
+                                                                       regions_list)))
+
+# Let’s see how that all looks for the first measurement
+selected_tacs$selected_tacdata[[1]]
+
+
+# calculate the total ROI sizes for use later with SiMBA
+
+
+region_totalvolume <- function(morph, regions, regionname) {
+  
+  morph %>% 
+    mutate(Region = regionname) %>% 
+    filter(name %in% regions) %>% 
+    group_by(Region) %>% 
+    summarise(Volume = sum(`volume-mm3`))
+  
+}
+
+region_totalvolumes <- function(morph, regions_list) {
+  
+  regionnames <- names(regions_list)
+  
+  out <- map2(regions_list, regionnames, ~region_totalvolume(morph, .x, .y))
+  
+  out <- purrr::reduce(out, dplyr::bind_rows)
+  
+  return(out)
+}
+
+roi_volumes <- morphdata %>%
+  select(sub, ses, study, morphdata) %>%
+  mutate(volumes = map(morphdata, ~region_totalvolumes(.x, regions_list))) %>%
+  select(-morphdata) %>%
+  unnest(volumes)
+```
+
+#Weights
+```{r}
+selected_tacs <- selected_tacs %>% 
+  group_by(sub, ses, study) %>% 
+  mutate(selected_tacdata = map(selected_tacdata, ~.x %>% 
+                                  mutate(weights = weights_create(tac = WholeBrain,
+                                                                  t_start = frame_start,
+                                                                  t_end = frame_end,
+                                                                  radioisotope = "C11",
+                                                                  minweight = 0.3)))) #%>% 
+                                  #select(-WholeBrain)))
+
+selected_tacs$selected_tacdata[[1]]
+```
+
+#Units
+```{r}
+# Time
+selected_tacs <- selected_tacs %>% 
+  group_by(sub, ses, study) %>% 
+  mutate(selected_tacdata = map(selected_tacdata, ~.x %>% 
+                                  mutate(frame_start = frame_start / 60,
+                                         frame_end = frame_end / 60) %>% 
+                                  mutate(frame_dur = frame_end - frame_start,
+                                         frame_mid = frame_start + 0.5*frame_dur)))
+
+
+
+# Radioactivity
+selected_tacs <- selected_tacs %>% 
+  group_by(sub, ses, study) %>% 
+  mutate(selected_tacdata = map(selected_tacdata, ~.x %>% 
+                                  pivot_longer(cols=Frontal:Accumbens, 
+                                               names_to = "Region",
+                                               values_to = "TAC") %>% 
+                                  mutate(TAC = unit_convert(TAC, 
+                                                            from_units="Bq",
+                                                            to_units = "kBq"))))
+
+
+selected_tacs
+
+selected_tacs$selected_tacdata[[1]]
+
+# separate them into each TAC, and remove the original tacdata and morphdata nested columns
+selected_tacs <- selected_tacs %>% 
+  select(-tacdata, -morphdata) %>% 
+  unnest(selected_tacdata) %>% 
+  group_by(sub, ses, study, Region) %>% 
+  nest(.key="tacdata")
+
+selected_tacs
+
+```
+
+
+#Attaching Blood Data
+```{r}
+modeldat <- selected_tacs %>%
+  inner_join(inputs)
+
+glimpse(modeldat)
+```
+
+
+#Test fit
+
+```{r}
+
+i <- 1
+
+tac <- modeldat$tacdata[[i]]$TAC
+t_tac <- modeldat$tacdata[[i]]$frame_mid
+
+
+input <- modeldat$input[[i]]
+
+test_fit <- twotcm1k(t_tac, tac, input)
+plot(test_fit)
+test_fit$par
+
+
+test_fit2 <- twotcm(t_tac, tac, input)
+plot(test_fit2)
+test_fit2$par
+```
+
+```{r}
+
+i <- 40
+
+tac <- modeldat$tacdata[[i]]$TAC
+t_tac <- modeldat$tacdata[[i]]$frame_mid
+
+
+input <- modeldat$input[[i]]
+
+test_fit <- twotcm1k(t_tac, tac, input)
+plot(test_fit)
+test_fit$par
+
+
+test_fit2 <- twotcm(t_tac, tac, input)
+plot(test_fit2)
+test_fit2$par
+```
+
+
+#Delay Fitting
+```{r, eval=FALSE}
+plan(multisession, workers = 8)
+
+delay_fits <- modeldat %>% 
+  ungroup() %>% 
+  mutate(delayFit = future_map2(tacdata, input, ~onetcm(.x$frame_mid, .x$TAC, .y,  ## GJM: this should be selected_tacdata, and should have a frame_mid
+                                                     vB = 0.05, 
+                                                     multstart_iter = 15,
+                                                     inpshift.lower = -1.5,
+                                                     inpshift.upper =  1.5,
+                                                     #weights=.x$weights,
+                                                     frameStartEnd = c(1,8)))) %>% 
+  mutate(inpshift = map_dbl(delayFit, c("par", "inpshift")))
+
+saveRDS(delay_fits, "/home/jan-erik/Repositories/PBR282BIDS/DerivedData/delay_fits.rds")
+
+```
+
+```{r, fig.height=15, fig.width=15}
+delay_fits <- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/delay_fits.rds") %>% 
+  mutate(PET = paste(sub, ses, study, sep="_"))
+
+ggplot(delay_fits, aes(x=inpshift)) +
+  geom_histogram(fill="grey", colour="black") +
+  facet_wrap(~PET)
+
+```
+
+```{r}
+delay_fits %>% 
+  filter(PET == "01_2_KIH12001") %>% 
+  mutate(plot = map(delayFit, plot)) %>% 
+  pull(plot)
+```
+
+
+```{r}
+delay_fits <- delay_fits %>% 
+  group_by(PET) %>% 
+  mutate(inpshift_median = median(inpshift))
+```
+
+```{r}
+plan(multisession, workers = 8)
+
+fit_delayPlot <- function(tacdata, input, inpshift) {
+  onetcm(tacdata$frame_mid, tacdata$TAC, input = input, 
+             inpshift = inpshift,
+             frameStartEnd = c(1,8),
+             weights=tacdata$weights)
+}
+
+
+delay_fitplots <- delay_fits %>% 
+  filter(Region=="Frontal") %>% 
+  ungroup() %>% 
+  mutate(delayPlotFit = future_pmap(list(tacdata, input, inpshift_median), 
+                                    fit_delayPlot))
+
+
+map2(delay_fitplots$delayPlotFit,delay_fitplots$PET,  ~plot(.x) + ggtitle(.y))
+```
+
+
+**Note:** best to do some pruning here.  Also, add a section for demographic info above someplace, and join it here with your data
+  **Note:** Load demographic info and get it ready to join before TAC fitting
+
+
+# Load Data
+```{r}
+library(readxl)
+PBR28_combined_demograph <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/PBR28_combined_demograph_KIH11004_KIH12001.xlsx") %>% 
+    mutate(
+    sub = str_pad(sub, width = 2, pad = "0"), 
+    ses = as.character(ses),
+    study = as.character(study)
+  )
+
+modeldat <- modeldat %>%
+  mutate(
+    sub = as.character(sub),
+    ses = as.character(ses),
+    study = as.character(study)
+  ) %>%
+  inner_join(delay_fits %>% select(sub, ses, study, PET, Region, inpshift_median),
+             by = c("sub", "ses", "study", "Region")) %>%
+  left_join(PBR28_combined_demograph, by = c("sub", "ses", "study"))
+
+saveRDS(modeldat, "/home/jan-erik/Repositories/PBR282BIDS/DerivedData/modeldat.rds")
+```
+
+
+#TAC fitting
+```{r}
+modeldat <- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/modeldat.rds")
+```
+
+
+```{r}
+modeldat_checking_blood <- modeldat %>% 
+  ungroup() %>% 
+  filter(Region=="Frontal") %>% 
+  select(sub, ses, study, PET, input)
+
+modeldat_checking_tacs <- modeldat %>% 
+  ungroup() %>% 
+  select(sub, ses, study, PET, Region, tacdata) %>% 
+  unnest(tacdata) %>% 
+  group_by(sub, ses, study, PET) %>% 
+  nest(.key="tacdata")
+  
+modeldat_checking <- inner_join(
+  modeldat_checking_blood,
+  modeldat_checking_tacs
+)
+
+plot_stuff_to_check <- function(tacdata, input, PET) {
+  
+  ggplot(tacdata, aes(x=frame_mid, y=TAC, colour=Region)) +
+    geom_point() +
+    geom_line() +
+    geom_line(colour="red", aes(x=Time, y=AIF), data=input) +
+    coord_cartesian(ylim=c(0, max(tacdata$TAC*1.3))) +
+    labs(title=PET)
+  
+}
+
+
+pmap(list(modeldat_checking$tacdata, modeldat_checking$input, modeldat_checking$PET), plot_stuff_to_check)
+```
+
+## 2TC and 2TC1K
+
+```{r}
+#Two-Tissue Compartment Model
+fit_2tc <- function(tacdata, input, inpshift) {
+  twotcm(tacdata$frame_mid, tacdata$TAC, input = input, 
+             inpshift = inpshift,
+             multstart_iter = 10,
+             weights=tacdata$weights)
+}
+
+plan(multisession, workers = 8)
+  
+fits_2tc <- modeldat %>% 
+  ungroup() %>% 
+  mutate(fit = future_pmap(list(tacdata, input, inpshift_median), fit_2tc))
+
+saveRDS(fits_2tc, "../DerivedData/2tc_fits_v1.rds")
+```
+
+
+
+```{r}
+#Two-Tissue Compartment Model 1K
+fit_2tc1k <- function(tacdata, input, inpshift) {
+  twotcm1k(tacdata$frame_mid, tacdata$TAC, input = input, 
+             inpshift = inpshift,
+             multstart_iter = 10,
+             weights=tacdata$weights)
+}
+
+plan(multisession, workers = 8)
+  
+fits_2tc1k <- modeldat %>% 
+  ungroup() %>% 
+  mutate(fit = future_pmap(list(tacdata, input, inpshift_median), fit_2tc1k))
+
+saveRDS(fits_2tc1k, "../DerivedData/2tc1k_fits_v1.rds")
+```
+
+
+```{r}
+fits_2tc <- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/2tc_fits_v1.rds")
+fits_2tc1k<- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/2tc1k_fits_v1.rds")
+
+
+plan(multisession, workers = 8)
+
+fc_fits <-  modeldat %>% 
+  ungroup() %>% 
+  filter(Region=="Frontal") %>% 
+  mutate(fit_2tc = future_pmap(list(tacdata, input, inpshift_median), fit_2tc)) %>% 
+  mutate(fit_2tc1k = future_pmap(list(tacdata, input, inpshift_median), fit_2tc1k))
+```
+
+
+
+```{r}
+fc_fits$PET <- paste(fc_fits$PET, fc_fits$Genotype)
+
+map2(fc_fits$fit_2tc, fc_fits$PET, ~plot(.x) + ggtitle(.y))
+```
+
+
+```{r}
+map2(fc_fits$fit_2tc1k, fc_fits$PET, ~plot(.x) + ggtitle(.y))
+```
+
+
+```{r}
+pars_2tc <- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/2tc_fits_v1.rds") %>% 
+  select(sub, ses, study, Region, PET, acronym, fit) %>% 
+  mutate(pars = map(fit, "par")) %>% 
+  select(-fit) %>% 
+  unnest(pars)
+
+pars_2tc
+```
+
+```{r}
+pars_2tc1k <- readRDS("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/2tc1k_fits_v1.rds") %>% 
+  select(sub, ses, study, Region, PET, acronym, fit) %>% 
+  mutate(pars = map(fit, "par")) %>% 
+  select(-fit) %>% 
+  unnest(pars)
+
+pars_2tc1k
+```
+
+### Reg par plots
+
+```{r, fig.height=12, fig.width=12}
+pars_2tc %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  ggplot(aes(x=as.numeric(Value), fill=Parameter)) +
+  geom_histogram(colour="black") +
+  facet_wrap(~Parameter, scales="free")
+
+pars_2tc %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  ggplot(aes(x=as.numeric(Value), fill=Parameter)) +
+  geom_histogram(colour="black") +
+  facet_wrap(~Parameter, scales="free") +
+  scale_x_log10()
+
+pars_2tc1k %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  ggplot(aes(x=as.numeric(Value), fill=Parameter)) +
+  geom_histogram(colour="black") +
+  facet_wrap(~Parameter, scales="free")
+
+pars_2tc1k %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  ggplot(aes(x=as.numeric(Value), fill=Parameter)) +
+  geom_histogram(colour="black") +
+  facet_wrap(~Parameter, scales="free") +
+  scale_x_log10()
+```
+
+### Reg par means
+
+```{r}
+pars_2tc %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  group_by(Parameter) %>% 
+  summarise(mean = mean(as.numeric(Value)),
+            median = median(as.numeric(Value)))
+
+pars_2tc1k %>% 
+  gather("Parameter", "Value", -inpshift, -vB) %>% 
+  group_by(Parameter) %>% 
+  summarise(mean = mean(as.numeric(Value)),
+            median = median(as.numeric(Value)))
+```
+
+Ta fram mean och median för genotype och region också - jämför med ovan
+
+
+```{r}
+twotcm_regpars <- pars_2tc %>% 
+  left_join(modeldat %>% 
+              select(sub, ses, study, Region, Genotype),
+            by = c("sub", "ses", "study", "Region")) %>% 
+  pivot_longer(cols = c(K1, Vnd, BPp, k4, Vt, BPnd, k3, k2),
+               names_to = "Parameter", values_to = "Value") %>% 
+  group_by(Region, Genotype, Parameter) %>% 
+  summarise(Value = median(Value), .groups = "drop") %>% 
+  pivot_wider(names_from = "Parameter", values_from = "Value") %>% 
+  mutate(Genotype = factor(Genotype, levels = c("LAB", "MAB", "HAB"))) %>% 
+  arrange(Region, Genotype)
+
+twotcm_regpars
+
+twotcm_regpars %>% 
+  arrange(Genotype, Region)
+
+  
+```
+
+
+
+```{r}
+twotcm1k_regpars <- pars_2tc1k %>% 
+  left_join(modeldat %>% 
+              select(sub, ses, study, Region, Genotype),
+            by = c("sub", "ses", "study", "Region")) %>% 
+  pivot_longer(cols = c(K1, Vnd, BPp, k4, Vt, BPnd, k3, k2),
+               names_to = "Parameter", values_to = "Value") %>% 
+  group_by(Region, Genotype, Parameter) %>% 
+  summarise(Value = median(Value), .groups = "drop") %>% 
+  pivot_wider(names_from = "Parameter", values_from = "Value") %>% 
+  mutate(Genotype = factor(Genotype, levels = c("LAB", "MAB", "HAB"))) %>% 
+  arrange(Region, Genotype)
+
+twotcm1k_regpars
+
+twotcm1k_regpars %>% 
+  arrange(Genotype, Region)
+
+  
+```
+
+
+##MA1
+
+```{r}
+modeldat_wide <- modeldat %>% 
+  select(-input) %>% 
+  unnest(tacdata) %>% 
+  pivot_wider(names_from="Region", values_from="TAC") %>% 
+  group_by(ses, sub, task, acq, run, rec, inpshift_median) %>% 
+  nest() %>% 
+  left_join(inputs)
+
+modeldat_wide
+```
+
+```{r, fig.height=12, fig.width=8}
+tstar_ma1 <- function(tacs, input, inpshift) {
+  ma1_tstar(tacs$frame_mid, 
+            lowroi = tacs$Hippocampus, 
+            medroi = tacs$Frontal, 
+            highroi = tacs$Putamen, 
+            input = input, 
+            inpshift = inpshift,
+            vB = 0.05)
+}
+
+
+modeldat_wide %>% 
+  ungroup() %>% 
+  slice(sample(1:n(), 5)) %>% 
+  mutate(plot = pmap(list(data, input, inpshift_median), tstar_ma1)) %>% 
+  pull(plot)
+```
+
+```{r}
+fit_ma1 <- function(tac, input, inpshift) {
+  ma1(tac$frame_mid, tac$TAC, input = input, 
+             inpshift = inpshift,
+             vB = 0.05,
+             tstarIncludedFrames = 11)
+}
+  
+fits_ma1 <- modeldat %>% 
+  ungroup() %>% 
+  mutate(fit = pmap(list(tacdata, input, inpshift_median), fit_ma1)) %>% 
+  mutate(Vt_ma1 = map_dbl(fit, c("par", "Vt")))
+```
+
+
+
+```{r}
+Vt_compare <- left_join(fits_ma1 %>% select(sub, ses, study, Region, PET, Vt_ma1),
+                        res_2tc %>% select(sub, ses, study, Region, PET, Vt_2tc = Vt)) %>% 
+  left_join(fc_fits %>% 
+              select(sub, ses, study, Genotype))
+
+ggplot(Vt_compare, aes(x=Vt_2tc, y=Vt_ma1, colour=sub)) +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_point(size=2, colour="black") +
+  geom_point(size=1.5) +
+  facet_wrap(~Region, scales="free") +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_line(aes(group=sub), size=0.4, linetype="dotted") +
+  guides(colour = "none") +
+  theme_light()
+
+ggplot(Vt_compare, aes(x=Vt_2tc, y=Vt_ma1, colour=sub)) +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_point(size=2, colour="black") +
+  geom_point(size=1.5) +
+  facet_wrap(~Region, scales="free") +
+  geom_line(aes(group=sub), size=0.4, linetype="dotted") +
+  guides(colour = "none") +
+  theme_light() +
+  scale_x_log10()
+```
+
+
+```{r}
+Vt_compare %>% 
+  filter(Vt_ma1 > 100)
+
+Vt_compare %>% 
+  filter(Vt_ma1 < 0)
+```
+
+```{r}
+zzz <- fc_fits %>% 
+  filter(sub==32) %>% 
+  filter(ses==1)
+
+plot(zzz$fit_2tc[[1]])
+
+zz <- modeldat %>% 
+  filter(sub==32) %>% 
+  filter(ses==1) %>% 
+  filter(Region=="Caudate") %>% 
+  pull(tacdata)
+
+ggplot(zz[[1]], aes(x=t_tac, y=TAC)) + 
+  geom_point()
+```
+
+This is weird. Remove this subject.
+
+
+```{r, fig.height=12, fig.width=12}
+library(ggplot2)
+library(ggbeeswarm)
+
+twotcm_individual <- pars_2tc %>%
+  left_join(modeldat %>% select(sub, ses, study, Region, Genotype),
+            by = c("sub", "ses", "study", "Region")) %>% 
+  mutate(Genotype = factor(Genotype, levels=c("HAB", "MAB", "LAB")))
+
+
+twotcm_individual %>% 
+  filter(Vt < 10) %>% 
+  ggplot(aes(x = Genotype, y = Vt)) +
+  geom_beeswarm(aes(colour = Genotype), cex = 3) +
+  facet_wrap(~Region, scales = "free") +
+  theme_light() +
+  labs(title = "Vt values by Genotype and Region",
+       y = expression(V[t]),
+       x = "Genotype") +
+  scale_y_log10()
+  
+
+
+twotcm_individual1k <- pars_2tc1k %>%
+  left_join(modeldat %>% select(sub, ses, study, Region, Genotype),
+            by = c("sub", "ses", "study", "Region")) %>% 
+  mutate(Genotype = factor(Genotype, levels=c("HAB", "MAB", "LAB")))
+
+twotcm_individual1k %>% 
+  filter(Vt < 10) %>% 
+  ggplot(aes(x = Genotype, y = Vt)) +
+  geom_beeswarm(aes(colour = Genotype), cex = 3) +
+  facet_wrap(~Region, scales = "free") +
+  theme_light() +
+  labs(title = "Vt values by Genotype and Region",
+       y = expression(V[t]),
+       x = "Genotype") +
+  scale_y_log10()
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+##Logan
+```{r, fig.height=12, fig.width=9}
+tstar_Logan <- function(tacs, input, inpshift) {
+  Logan_tstar(tacs$frame_mid, 
+            lowroi = tacs$Hippocampus, 
+            medroi = tacs$Frontal, 
+            highroi = tacs$Putamen, 
+            input = input, 
+            inpshift = inpshift,
+            vB = 0.05)
+}
+
+
+modeldat_wide %>% 
+  ungroup() %>% 
+  slice(sample(1:n(), 5)) %>% 
+  mutate(plot = pmap(list(data, input, inpshift_median), tstar_Logan)) %>% 
+  pull(plot)
+```
+
+```{r}
+fit_Logan <- function(tac, input, inpshift) {
+  Loganplot(tac$frame_mid, tac$TAC, input = input, 
+             inpshift = inpshift,
+             vB = 0.05,
+             tstarIncludedFrames = 11)
+}
+  
+fits_Logan <- modeldat %>% 
+  ungroup() %>% 
+  mutate(fit = pmap(list(tacdata, input, inpshift_median), fit_Logan)) %>% 
+  mutate(Vt_Logan = map_dbl(fit, c("par", "Vt")))
+```
+
+```{r}
+Vt_compare <- left_join(fits_ma1 %>% select(sub, ses, study, Region, PET, Vt_ma1),
+                        res_2tc %>% select(sub, ses, study, Region, PET, Vt_2tc = Vt)) %>% 
+  left_join(fits_Logan %>% select(sub, ses, study, Region, PET, Vt_Logan))
+
+ggplot(Vt_compare, aes(x=Vt_2tc, y=Vt_ma1, colour=sub)) +
+  geom_point() +
+  facet_wrap(~Region, scales="free") +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_line(aes(group=sub), size=0.4, linetype="dotted") +
+  guides(colour = "none") +
+  theme_light()
+
+ggplot(Vt_compare, aes(x=Vt_Logan, y=Vt_ma1, colour=sub)) +
+  geom_point() +
+  facet_wrap(~Region, scales="free") +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_line(aes(group=sub), size=0.4, linetype="dotted") +
+  guides(colour = "none") +
+  theme_light() 
+
+ggplot(Vt_compare, aes(x=Vt_2tc, y=Vt_Logan, colour=sub)) +
+  geom_point() +
+  facet_wrap(~Region, scales="free") +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  geom_line(aes(group=sub), size=0.4, linetype="dotted") +
+  guides(colour = "none") +
+  theme_light() 
+```
+
+```{r}
+Vt_trt <- Vt_compare %>% 
+  filter(str_detect(ses, "test"))
+
+bind_rows(
+  relfeas::trt(Vt_trt %>% filter(Region=="Frontal"), "Vt_ma1", "sub", "ses")$tidy,
+  relfeas::trt(Vt_trt %>% filter(Region=="Frontal"), "Vt_Logan", "sub", "ses")$tidy,
+  relfeas::trt(Vt_trt %>% filter(Region=="Frontal"), "Vt_2tc", "sub", "ses")$tidy,
+  
+  relfeas::trt(Vt_trt %>% filter(Region=="Hippocampus"), "Vt_ma1", "sub", "ses")$tidy,
+  relfeas::trt(Vt_trt %>% filter(Region=="Hippocampus"), "Vt_Logan", "sub", "ses")$tidy,
+  relfeas::trt(Vt_trt %>% filter(Region=="Hippocampus"), "Vt_2tc", "sub", "ses")$tidy
+) %>% 
+  mutate(Region = rep(c("Frontal", "Hippocampus"), each=3),
+         Model = rep(c("MA1", "Logan", "2TC"), 2)) %>% 
+  select(Model, Region, Mean = mean, CV = cv, ICC = icc, WSCV = wscv)
+```
+
+
+
+
+
+#SiMBA Preparation
+##AIF Parameters
+```{r}
+aifpars_kih12001 <- bloodstream_import_aifpars(
+  "/home/jan-erik/Repositories/BIDS/KIH12001/derivatives/bloodstream2025-05-08_id-jtjH"
+) %>%
+  unnest(AIFpars) %>%
+  mutate(study = "KIH12001")
+
+aifpars_kih11004 <- bloodstream_import_aifpars(
+  "/home/jan-erik/Repositories/BIDS/KIH11004/derivatives/bloodstream2025-05-08_id-jtjH"
+) %>%
+  unnest(AIFpars) %>%
+  mutate(study = "KIH11004")
+
+aifpars <- bind_rows(aifpars_kih12001, aifpars_kih11004)
+
+aifpars <- aifpars %>% #Removing the subjects that were previously removed in modeldat
+  filter(
+    !(sub == "58" & ses == "1" & study == "KIH12001"), 
+    !(sub == "20" & ses == "1" & study == "KIH11004"),
+    !(sub == "32" & ses == "1" & study == "KIH12001")
+  )
+
+
+aifpars
+```
+
+#Alignings TACs and AIFs
+```{r}
+aifpars <- aifpars %>% 
+  left_join(delay_fits %>% 
+              select(sub, ses, study, inpshift_median) %>% 
+              filter(!duplicated(paste(sub, ses, study)))) %>%
+  mutate(t0_inpshift = t0 + inpshift_median)
+
+ggplot(aifpars, aes(x=t0_inpshift)) +
+  geom_histogram(colour="black", fill="grey") +
+  geom_vline(xintercept=0, linetype="dashed")
+```
+
+```{r}
+aifpars_tocombine <- aifpars %>% 
+  mutate(tacshift = ifelse(t0_inpshift < 0, -t0_inpshift, no=0),
+         t0 = ifelse(t0_inpshift < 0, yes=0, no=t0_inpshift))
+
+aifpars_tocombine
+
+simba_modeldat <- modeldat %>% 
+  select(-input, -inpshift_median) %>% 
+  unnest(tacdata) %>% 
+  inner_join(aifpars_tocombine) %>% #Using inner_join as we removed problematic people
+  mutate(t_tac = frame_mid + tacshift,
+         frame_start = frame_start + tacshift,
+         frame_end = frame_end + tacshift)
+
+head(simba_modeldat)
+```
+
+#Whole Blood TACs
+```{r}
+tactiming <- simba_modeldat %>% 
+  select(sub, ses, study, frame_start, frame_end, tacshift) %>% 
+  filter(!duplicated(paste(sub, ses, study, frame_start, frame_end))) %>% 
+  group_by(sub, ses, study) %>% 
+  nest(tacs = starts_with("frame"))
+
+meanblood <- aifpars_tocombine %>% 
+  select(sub, ses, study, inpshift_median) %>% 
+  left_join(inputs) %>% 
+  left_join(tactiming) %>% 
+  mutate(inpshift2 = inpshift_median + tacshift) %>% 
+  mutate(input = map2(input, inpshift2, ~mutate(.x, Time = Time + .y))) %>% 
+  filter(!is.na(tacshift))
+
+meanblood
+```
+
+```{r}
+add_meanblood <- function(input, tacs) {
+  meanblood_vec <- map2_dbl(tacs$frame_start, tacs$frame_end, 
+                             ~input %>% 
+                               filter(Time >= .x) %>% 
+                               filter(Time < .y) %>% 
+                               pull(Blood) %>% 
+                               mean())
+  
+  tacs %>% 
+    mutate(meanblood = meanblood_vec)
+}
+
+meanblood <- meanblood %>% 
+  mutate(tacs = map2(input, tacs, add_meanblood)) %>% 
+  select(sub, ses, study, tacs) %>% 
+  unnest(tacs) %>% 
+  filter(!duplicated(paste(sub, ses, study, frame_start, frame_end)))
+
+meanblood
+```
+
+```{r}
+meanblood %>% 
+  filter(sub == sub[1]) %>% 
+  filter(ses==ses[1]) %>% 
+  mutate(t_tac = frame_start + 0.5*(frame_end-frame_start)) %>% 
+  ggplot(aes(x=t_tac, y=meanblood)) +
+  geom_line(colour="red") +
+  geom_point()
+```
+
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  inner_join(meanblood) %>% 
+  select(-inpshift_median, -t0_inpshift, -tacshift)
+```
+
+#Region Sizes
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  inner_join(roi_volumes) %>% 
+  ungroup() %>% 
+  mutate(logRegSize = log(Volume),
+         logRegSize_c = logRegSize - mean(logRegSize))
+```
+
+<!-- #Injected Radioactivity -->
+<!-- ```{r} -->
+<!-- injection_info <- injection_info %>%  -->
+<!--   ungroup() %>%  -->
+<!--   mutate(logInjRad = log(InjRad), -->
+<!--          logInjRad_c = logInjRad - mean(logInjRad)) -->
+
+<!-- simba_modeldat <- simba_modeldat %>%  -->
+<!--   left_join(injection_info) -->
+<!-- ``` -->
+
+#Durations
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  mutate(logdur = log(frame_dur),
+         logdur_c = logdur - mean(logdur))
+```
+
+<!-- #Covariates -->
+<!-- ```{r} -->
+<!-- covariates <- read_tsv("../RawData/ds004869/participants.tsv") %>%  -->
+<!--   rename(sub = participant_id, -->
+<!--          Age = age, -->
+<!--          Sex = sex) %>%  -->
+<!--   mutate(sub = str_remove(sub, "sub-")) %>%  -->
+<!--   mutate(Age_dec = Age / 10, -->
+<!--          Age_dec_c = Age_dec - mean(Age_dec)) -->
+
+<!-- simba_modeldat <- simba_modeldat %>%  -->
+<!--   left_join(covariates) %>%  -->
+<!--   ungroup() -->
+<!-- ``` -->
+
+#Saving
+```{r}
+naniar::miss_var_summary(simba_modeldat)
+```
+
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  filter(!is.na(meanblood))
+
+naniar::miss_var_summary(simba_modeldat)
+```
+
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  mutate(Region = as.factor(Region),
+         Region = relevel(Region, "Frontal"))
+
+saveRDS(simba_modeldat, "../DerivedData/pbr28_12001_11004_simba_modeldat.rds")
+```
+
+# SiMBA Modelling
+
+```{r}
+simba_modeldat <- readRDS("../DerivedData/pbr28_12001_11004_simba_modeldat.rds") %>% 
+  mutate(PET = paste(sub, ses, study)) %>% 
+  mutate(ID = paste(sub, study)) %>% 
+  mutate(Genotype = factor(Genotype)) %>% 
+  mutate(Genotype = relevel(Genotype, "HAB"))
+```
+
+## Priors
+
+```{r}
+readRDS("../DerivedData/2tc1k_fits_v1.rds") %>% 
+  mutate(resids = map(fit, ~as.numeric(residuals(.x$fit)))) %>% 
+  select(resids) %>% 
+  unnest(resids) %>% 
+  pull(resids) %>% 
+  median()
+
+
+log(mean(abs(as.numeric(resid(test_fit$fit)))))
+```
+
+```{r}
+twotcm1k_regpars %>% 
+  arrange(Genotype, Region)
+```
+
+
+
+## 2TC STAN Model
+
+```{r}
+two_compartment_fengconv_stan <- "
+
+real Integral_Feng_2TC(real time, real A, real B, real C, 
+                       real alpha, real beta, real gamma, 
+                       real Th1, real Th2, real Ph1, real Ph2) {
+     
+    real integ;
+    
+    integ = -((A*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)^(2))) - 
+    (A*Ph1*(1 - (1 + alpha*time)/exp(alpha*time)))/(alpha*(alpha - Th1)^(2)) + 
+   (B*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)) + 
+    (C*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)) +
+    (A*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)^(2)*Th1) - 
+   (B*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)*Th1) - 
+    (C*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)*Th1) +
+    (B*(1 - exp(-(time*Th1)))*Ph1)/((beta - Th1)*Th1) + 
+   (C*(1 - exp(-(time*Th1)))*Ph1)/((gamma - Th1)*Th1) + 
+    (A*Ph1*(1 - (1 + alpha*time)/exp(alpha*time))*Th1)/
+    ((alpha)^(2)*(alpha - Th1)^(2)) + 
+   (B*(1 - exp(-(beta*time)))*Ph1)/(beta*(-beta + Th1)) + 
+    (C*(1 - exp(-(gamma*time)))*Ph1)/(gamma*(-gamma + Th1)) - 
+    (A*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)^(2)) - 
+   (A*Ph2*(1 - (1 + alpha*time)/exp(alpha*time)))/
+    (alpha*(alpha - Th2)^(2)) + 
+    (B*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)) + 
+    (C*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)) + 
+   (A*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)^(2)*Th2) - 
+    (B*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)*Th2) - 
+    (C*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)*Th2) + 
+   (B*(1 - exp(-(time*Th2)))*Ph2)/((beta - Th2)*Th2) + 
+    (C*(1 - exp(-(time*Th2)))*Ph2)/((gamma - Th2)*Th2) + 
+   (A*Ph2*(1 - (1 + alpha*time)/exp(alpha*time))*Th2)/
+    ((alpha)^(2)*(alpha - Th2)^(2)) + 
+    (B*(1 - exp(-(beta*time)))*Ph2)/(beta*(-beta + Th2)) + 
+   (C*(1 - exp(-(gamma*time)))*Ph2)/(gamma*(-gamma + Th2));
+   
+   return(integ);
+                       
+}
+
+real twotcm_log_stan(real logK1, real logVnd, real logBPnd, 
+                    real logk4, real logvB, real time,
+                    real t0, 
+                    real A, real B, real C, 
+                    real alpha, real beta, real gamma,
+                    real ti, real bloodval) {
+
+    real K1;
+    real k2;
+    real k3;
+    real k4;
+    real Vnd;
+    real BPnd;
+    real vB;
+    
+    real Th1;
+    real Th2;
+    real Ph1;
+    real Ph2;
+    
+    real tcorr;
+    
+    real pred;
+    
+
+    
+    K1 = exp(logK1);
+    Vnd = exp(logVnd);
+    BPnd = exp(logBPnd);
+    k4 = exp(logk4);
+    vB = exp(logvB);
+    
+    k2 = K1 / Vnd;
+    k3 = k4 * BPnd;
+  
+    Th1 = 0.5 * (k2 + k3 + k4 + sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+    Th2 = 0.5 * (k2 + k3 + k4 - sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+
+    Ph1 = (K1 * (Th1 - k3 - k4))/(Th1 - Th2);
+    Ph2 = (K1 * (k3 + k4 - Th2))/(Th1 - Th2);
+    
+    tcorr = time - t0;
+  
+  pred =  // 2TC contribution
+          (1-vB) * (
+            (tcorr > 0) * (             // Before t0 equal to 0
+              
+              // Before t0+ti
+              (tcorr < ti)*(1/ti)*(     
+                Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2)
+              ) +
+                
+              // After t0+ti 
+              (tcorr >= ti)*(1/ti)* (   
+                Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2) -
+                  Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2)
+              )
+            )
+          ) +
+          // Blood contribution
+          vB*bloodval;
+       
+  return(pred);
+}
+real twotcm_log_stan_BPp(real logK1, real logVnd, real logBPp, 
+                    real logk4, real logvB, real time,
+                    real t0, 
+                    real A, real B, real C, 
+                    real alpha, real beta, real gamma,
+                    real ti, real bloodval) {
+
+    real K1;
+    real k2;
+    real k3;
+    real k4;
+    real Vnd;
+    real BPnd;
+    real BPp;
+    real vB;
+    
+    real Th1;
+    real Th2;
+    real Ph1;
+    real Ph2;
+    
+    real tcorr;
+    
+    real pred;
+    
+
+    
+    K1 = exp(logK1);
+    Vnd = exp(logVnd);
+    BPp = exp(logBPp);
+    k4 = exp(logk4);
+    vB = exp(logvB);
+    
+    k2 = K1 / Vnd;
+    k3 = (k4 * BPp)/Vnd;
+  
+    Th1 = 0.5 * (k2 + k3 + k4 + sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+    Th2 = 0.5 * (k2 + k3 + k4 - sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+
+    Ph1 = (K1 * (Th1 - k3 - k4))/(Th1 - Th2);
+    Ph2 = (K1 * (k3 + k4 - Th2))/(Th1 - Th2);
+    
+    tcorr = time - t0;
+  
+  pred =  // 2TC contribution
+          (1-vB) * (
+            (tcorr > 0) * (             // Before t0 equal to 0
+              
+              // Before t0+ti
+              (tcorr < ti)*(1/ti)*(     
+                Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2)
+              ) +
+                
+              // After t0+ti 
+              (tcorr >= ti)*(1/ti)* (   
+                Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2) -
+                  Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma, 
+                                 Th1, Th2, Ph1, Ph2)
+              )
+            )
+          ) +
+          // Blood contribution
+          vB*bloodval;
+       
+  return(pred);
+}
+"
+```
+
+## One TAC
+```{r}
+dat_i <- simba_modeldat %>% 
+  filter(sub==sub[4291]) %>% 
+  filter(ses == ses[1]) %>% 
+  filter(Region=="Frontal") %>% 
+  mutate(sqrtinvw = sqrt(1/weights)) 
+```
+
+```{r}
+set.seed(1337)
+
+twotcm_prior <- c(
+  set_prior("normal(-2, 0.5)", nlpar = "logK1"),
+  set_prior("normal(0, 0.5)", nlpar = "logVnd"),
+  set_prior("normal(1, 0.5)", nlpar = "logBPnd"),
+  set_prior("normal(-3, 0.5)", nlpar = "logk4"),
+  set_prior("normal(-3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 1)", dpar = "sigma", coef="sqrtinvw"))
+
+
+twotcm_fit_formula <- bf( TAC ~ twotcm_log_stan(logK1, logVnd, logBPnd, logk4, 
+                                                 logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+     sigma ~ 0 + sqrtinvw,
+     # Nonlinear variables
+     logK1 + logVnd + logBPnd + logk4 + logvB ~ 1,
+     # Nonlinear fit
+     nl = TRUE)
+
+get_prior(twotcm_fit_formula, data=dat_i, family = gaussian())
+
+make_stancode(twotcm_fit_formula,
+  family=gaussian(), 
+  data = dat_i,
+  prior = twotcm_prior,
+  stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+                     block="functions"))
+
+
+# get_prior(twotcm_fit_formula,
+#   family=gaussian(), 
+#   data = modeldat)
+
+    
+twotcm_fit <- brm(
+  twotcm_fit_formula,
+  family=gaussian(),
+  data = dat_i,
+  prior = twotcm_prior,
+  stanvars = stanvar(scode = two_compartment_fengconv_stan,
+             block="functions"),
+  control = list(adapt_delta=0.90),
+  chains = 3,
+  cores = 3,
+  iter = 1000,
+  backend = "rstan", init = 0)
+
+  
+
+summary(twotcm_fit)
+```
+
+```{r}
+brms::expose_functions(twotcm_fit, vectorize=TRUE)
+```
+
+
+```{r}
+pred <- predict(twotcm_fit) %>% 
+  as_tibble() %>% 
+  select(P_L95 = "Q2.5",
+         P_U95 = "Q97.5")
+
+fitted <- fitted(twotcm_fit) %>% 
+  as_tibble() %>% 
+  select(Estimate, 
+         F_L95 = "Q2.5",
+         F_U95 = "Q97.5")
+
+dat_i_fitted <- dat_i %>% 
+  bind_cols(pred) %>% 
+  bind_cols(fitted)
+
+ggplot(dat_i_fitted, aes(x=t_tac, y=TAC)) +
+  geom_point() +
+  geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.1) +
+  geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.2) +
+  geom_line(aes(y=Estimate)) 
+```
+
+
+
+## Model 1: 2TC
+
+
+```{r}
+simba_fit_formula <- bf( TAC ~ twotcm_log_stan(logK1, logVnd, logBPnd, logk4, 
+                                                 logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac) + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + Genotype + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + Genotype + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(-2, 0.5)", nlpar = "logK1"),
+  set_prior("normal(0, 0.5)", nlpar = "logVnd"),
+  set_prior("normal(1, 0.5)", nlpar = "logBPnd"),
+  set_prior("normal(-3, 0.5)", nlpar = "logk4"),
+  set_prior("normal(-3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.5)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+   
+  set_prior("normal(-0.5, 0.5 )", coef="GenotypeMAB", nlpar="logBPnd"),
+  set_prior("normal(-1.5, 0.5 )", coef="GenotypeLAB", nlpar="logBPnd"),
+  
+  set_prior("normal(0.3, 0.5 )", coef="GenotypeMAB", nlpar="logk4"),
+  set_prior("normal(1, 0.5 )", coef="GenotypeLAB", nlpar="logk4"),
+
+  set_prior("normal(0, 1)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+rm(fit1_bpnd)
+job::job({
+  fit1_bpnd <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+    chains=2, cores=2, threads = threading(6), seed =  765)
+  
+  saveRDS(fit1_bpnd, "../DerivedData/pbr28_2tc_fit1.rds")
+})
+```
+
+```{r}
+fit1_bpnd <- readRDS("../DerivedData/pbr28_2tc_fit1.rds")
+print(summary(fit1_bpnd, digits=3))
+```
+
+
+
+
+## Model 1: 2TC Small Data
+
+
+```{r}
+simba_fit_formula <- bf( TAC ~ twotcm_log_stan(logK1, logVnd, logBPnd, logk4, 
+                                                 logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac) + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + Genotype + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + Genotype + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(-2, 0.5)", nlpar = "logK1"),
+  set_prior("normal(0, 0.5)", nlpar = "logVnd"),
+  set_prior("normal(1, 0.5)", nlpar = "logBPnd"),
+  set_prior("normal(-3, 0.5)", nlpar = "logk4"),
+  set_prior("normal(-3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.5)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+   
+  set_prior("normal(-0.5, 0.5 )", coef="GenotypeMAB", nlpar="logBPnd"),
+  set_prior("normal(-1.5, 0.5 )", coef="GenotypeLAB", nlpar="logBPnd"),
+  
+  set_prior("normal(0.3, 0.5 )", coef="GenotypeMAB", nlpar="logk4"),
+  set_prior("normal(1, 0.5 )", coef="GenotypeLAB", nlpar="logk4"),
+
+  set_prior("normal(0, 1)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat_small, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat_small,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat_small,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+rm(fit1_bpnd)
+job::job({
+  fit1_bpnd <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+    chains=2, cores=2, threads = threading(6), seed =  765)
+  
+  saveRDS(fit1_bpnd, "../DerivedData/pbr28_2tc_fit1_small.rds")
+})
+```
+
+```{r}
+fit1_bpnd <- readRDS("../DerivedData/pbr28_2tc_fit1_small.rds")
+print(summary(fit1_bpnd, digits=3))
+```
+
+
+
+
+
+
+
+
+
+
+
+### Preds
+
+```{r}
+# writeLines(brms::stancode(fit1_bpnd), con = "stancode.stan")
+# expose_stan_functions(rstan::stan_model("stancode.stan"))
+
+priorfit <- brm(
+    simba_fit_formula,
+    family=gaussian(),
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_fengconv_stan,
+               block="functions"),
+    backend = "rstan", init = 0, iter = 100,
+    chains=1, cores=1, seed = 753273, sample_prior = "only")
+
+brms::expose_functions(priorfit, vectorize=TRUE, verbose = F, 
+                       show_compiler_warnings = F)
+
+preds <- predict(fit1_bpnd)
+fitted <- fitted(fit1_bpnd)
+looic <- loo(fit1_bpnd)
+  
+saveRDS(preds, "../DerivedData/pbr28_preds_mod1.rds")
+saveRDS(fitted, "../DerivedData/pbr28_fitted_mod1.rds")
+saveRDS(looic, "../DerivedData/pbr28_loo_mod1.rds")
+```
+
+### Plots
+
+```{r}
+preds <- readRDS("../DerivedData/pbr28_preds_mod1.rds")
+fitted <- readRDS("../DerivedData/pbr28_fitted_mod1.rds")
+ps_loo <- readRDS("../DerivedData/pbr28_loo_mod1.rds")
+
+simba_modeldat$P_L95 <- preds[,3]
+simba_modeldat$P_U95 <- preds[,4]
+simba_modeldat$F_L95 <- fitted[,3]
+simba_modeldat$F_U95 <- fitted[,4]
+simba_modeldat$Estimate <- fitted[,1]
+```
+
+```{r, fig.height=9, fig.width=12}
+library(ggsci)
+
+check_some_fits <- function(modeldat, sampleid) {
+
+    checkdat <- modeldat %>%
+        filter(PET_Genotype == sampleid)
+
+    ggplot(checkdat, aes(x=t_tac, y=TAC, colour=Region, fill=Region)) +
+        geom_point(colour="black", size=2) +
+        geom_point(size=1.5) +
+        geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.3) +
+        geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.3) +
+        geom_line(aes(y=Estimate)) +
+        facet_wrap(~Region, scales="free", ncol=3) +
+        scale_colour_manual(values=pal_npg("nrc", alpha = 1)(10)[1:12]) +
+        scale_fill_manual(values=pal_npg("nrc", alpha = 0.3)(10)[1:12]) +
+        labs(y=expression(paste("Radioactivity (kBq/cc)", sep="")),
+             x="Time (min)",
+             title = sampleid)
+
+}
+
+simba_modeldat$PET_Genotype <- paste(simba_modeldat$PET, simba_modeldat$Genotype)
+
+ids <- unique(simba_modeldat$PET_Genotype) #sample(unique(modeldat$ID), 5)
+
+map(ids, ~check_some_fits(simba_modeldat, .x))
+```
+
+
+```{r}
+brms::conditional_smooths(fit1_bpnd)
+```
+
+### LOO
+
+
+```{r}
+loo_2tc <- readRDS("../DerivedData/pbr28_loo_mod1.rds")
+loo_2tc
+```
+
+
+```{r}
+loo_2tc_inf <- simba_modeldat %>% 
+  mutate(loo_k = loo::pareto_k_influence_values(loo_2tc))
+
+loo_2tc_inf %>% 
+  select(sub, ses, study, ID, Region, frame_start, loo_k) %>% 
+  arrange(-loo_k)
+
+kv <- loo_2tc_inf %>% filter(loo_k > 0.7) 
+table(kv$ID, kv$ses)
+table(kv$Region)
+```
+
+
+### Estimated Parameters
+
+```{r}
+abc <- ranef(fit1_bpnd)
+
+abc$sub[,,"logBPnd_Intercept"]
+```
+
+
+
+
+
+```{r}
+modelmat <- simba_modeldat %>% 
+  mutate(TAC_factor = paste(sub, ses, study, Region)) %>% 
+  filter(!duplicated(TAC_factor)) 
+
+logBPnd_tac_re_ep_samples <- posterior_epred(fit1_bpnd, 
+                                         newdata=modelmat %>% as.data.frame(), 
+                                         re_formula = ~ (1|sub) + (1|PET:Region), 
+                                         nlpar = c("logBPnd")) %>% 
+  as_tibble(name_repair="unique") %>%
+  gather(ID_n, Value) %>% 
+  group_by(ID_n) %>% 
+  mutate(sample_n = 1:n()) %>% lmerTest
+  mutate(ID_n = str_remove(ID_n, "V"),
+         ID_n = as.numeric(ID_n)) %>% 
+  arrange(ID_n) %>% 
+  group_by(ID_n) %>% 
+  summarise(Estimate = mean(Value),
+            Est.Error = sd(Value),
+            `Q2.5` = quantile(Value, 0.025),
+            `Q97.5` = quantile(Value, 0.975)) %>% 
+  bind_cols(modelmat)
+
+ggplot(logBPnd_tac_re_ep_samples, aes(x=ses, y=Estimate, group=sub)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~Region, ncol=5)
+```
+
+```{r}
+logk4_tac_re_ep_samples <- posterior_epred(fit1_bpnd, 
+                                         newdata=modelmat %>% as.data.frame(), 
+                                         re_formula = ~ (1|sub) + (1|Region) + (1|PET:Region), 
+                                         nlpar = c("logk4")) %>% 
+  as_tibble(name_repair="unique") %>%
+  gather(ID_n, Value) %>% 
+  group_by(ID_n) %>% 
+  mutate(sample_n = 1:n()) %>% 
+  mutate(ID_n = str_remove(ID_n, "V"),
+         ID_n = as.numeric(ID_n)) %>% 
+  arrange(ID_n) %>% 
+  group_by(ID_n) %>% 
+  summarise(Estimate = mean(Value),
+            Est.Error = sd(Value),
+            `Q2.5` = quantile(Value, 0.025),
+            `Q97.5` = quantile(Value, 0.975)) %>% 
+  bind_cols(modelmat)
+
+ggplot(logk4_tac_re_ep_samples, aes(x=ses, y=Estimate, group=sub)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~Region)
+```
+
+```{r}
+logVnd_tac_re_ep_samples <- posterior_epred(fit1_bpnd, 
+                                         newdata=modelmat %>% as.data.frame(), 
+                                         re_formula = ~ (1|sub) + (1|Region) + (1|PET:Region), 
+                                         nlpar = c("logVnd")) %>% 
+  as_tibble(name_repair="unique") %>%
+  gather(ID_n, Value) %>% 
+  group_by(ID_n) %>% 
+  mutate(sample_n = 1:n()) %>% 
+  mutate(ID_n = str_remove(ID_n, "V"),
+         ID_n = as.numeric(ID_n)) %>% 
+  arrange(ID_n) %>% 
+  group_by(ID_n) %>% 
+  summarise(Estimate = mean(Value),
+            Est.Error = sd(Value),
+            `Q2.5` = quantile(Value, 0.025),
+            `Q97.5` = quantile(Value, 0.975)) %>% 
+  bind_cols(modelmat)
+
+ggplot(logVnd_tac_re_ep_samples, aes(x=ses, y=Estimate, group=sub)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~Region)
+```
+
+```{r}
+logK1_tac_re_ep_samples <- posterior_epred(fit1_bpnd, 
+                                         newdata=modelmat %>% as.data.frame(), 
+                                         re_formula = ~ (1|sub) + (1|Region) + (1|PET:Region), 
+                                         nlpar = c("logK1")) %>% 
+  as_tibble(name_repair="unique") %>%
+  gather(ID_n, Value) %>% 
+  group_by(ID_n) %>% 
+  mutate(sample_n = 1:n()) %>% 
+  mutate(ID_n = str_remove(ID_n, "V"),
+         ID_n = as.numeric(ID_n)) %>% 
+  arrange(ID_n) %>% 
+  group_by(ID_n) %>% 
+  summarise(Estimate = mean(Value),
+            Est.Error = sd(Value),
+            `Q2.5` = quantile(Value, 0.025),
+            `Q97.5` = quantile(Value, 0.975)) %>% 
+  bind_cols(modelmat)
+
+ggplot(logK1_tac_re_ep_samples, aes(x=ses, y=Estimate, group=sub)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~Region)
+```
+
+```{r}
+logBPp_tac_re_ep_samples <- inner_join(
+  logBPnd_tac_re_ep_samples %>% select(-Est.Error, -`Q2.5`, -`Q97.5`) %>% rename(logBPnd = Estimate),
+  logVnd_tac_re_ep_samples %>% select(-Est.Error, -`Q2.5`, -`Q97.5`) %>% rename(logVnd = Estimate)
+) %>% 
+  mutate(Estimate = logVnd + logBPnd)
+
+ggplot(logBPp_tac_re_ep_samples, aes(x=ses, y=Estimate, group=sub)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~Region)
+```
+
+
+
+
+
+
+
+# Model 2: 2TC1K - no mixture, Kb outside vB
+
+## 2TC1K STAN Model
+
+```{r}
+two_compartment_1k_fengconv_stan <- "
+
+real Integral_Feng_2TC(real time, real A, real B, real C,
+                       real alpha, real beta, real gamma,
+                       real Th1, real Th2, real Ph1, real Ph2) {
+
+    real integ;
+
+    integ = -((A*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)^(2))) -
+    (A*Ph1*(1 - (1 + alpha*time)/exp(alpha*time)))/(alpha*(alpha - Th1)^(2)) +
+   (B*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)) +
+    (C*(1 - exp(-(alpha*time)))*Ph1)/(alpha*(alpha - Th1)) +
+    (A*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)^(2)*Th1) -
+   (B*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)*Th1) -
+    (C*(1 - exp(-(time*Th1)))*Ph1)/((alpha - Th1)*Th1) +
+    (B*(1 - exp(-(time*Th1)))*Ph1)/((beta - Th1)*Th1) +
+   (C*(1 - exp(-(time*Th1)))*Ph1)/((gamma - Th1)*Th1) +
+    (A*Ph1*(1 - (1 + alpha*time)/exp(alpha*time))*Th1)/
+    ((alpha)^(2)*(alpha - Th1)^(2)) +
+   (B*(1 - exp(-(beta*time)))*Ph1)/(beta*(-beta + Th1)) +
+    (C*(1 - exp(-(gamma*time)))*Ph1)/(gamma*(-gamma + Th1)) -
+    (A*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)^(2)) -
+   (A*Ph2*(1 - (1 + alpha*time)/exp(alpha*time)))/
+    (alpha*(alpha - Th2)^(2)) +
+    (B*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)) +
+    (C*(1 - exp(-(alpha*time)))*Ph2)/(alpha*(alpha - Th2)) +
+   (A*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)^(2)*Th2) -
+    (B*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)*Th2) -
+    (C*(1 - exp(-(time*Th2)))*Ph2)/((alpha - Th2)*Th2) +
+   (B*(1 - exp(-(time*Th2)))*Ph2)/((beta - Th2)*Th2) +
+    (C*(1 - exp(-(time*Th2)))*Ph2)/((gamma - Th2)*Th2) +
+   (A*Ph2*(1 - (1 + alpha*time)/exp(alpha*time))*Th2)/
+    ((alpha)^(2)*(alpha - Th2)^(2)) +
+    (B*(1 - exp(-(beta*time)))*Ph2)/(beta*(-beta + Th2)) +
+   (C*(1 - exp(-(gamma*time)))*Ph2)/(gamma*(-gamma + Th2));
+
+   return(integ);
+
+}
+real Integral_Feng(real time, real A, real B, real C, 
+                    real alpha, real beta, real gamma) {
+  
+  real integ;
+  
+  integ = (((A - alpha * (B + C))/alpha^2) * (1 - exp(-alpha * time))) - // term1
+  ((A/alpha) * time * exp(-alpha * time)) + // term 2
+  ((B/beta) * (1 - exp(-beta * time))) + // term 3
+  ((C/gamma) * (1 - exp(-gamma * time))); // term4
+  
+  return(integ);
+}
+real Integral_FengConv(real time, real A, real B, real C, 
+                        real alpha, real beta, real gamma, real ti) {
+
+   real integ;
+
+  // Before ti
+  integ = (time <= ti) * (
+    Integral_Feng(time, A, B, C, alpha, beta, gamma) * (time / ti) ) +
+  // After ti
+  (time > ti) * (
+    Integral_Feng(time, A, B, C, alpha, beta, gamma) );
+  
+  return(integ);
+}
+
+real twotcm1k_log_stan(real logK1, real logVnd, real logBPnd, real logk4,
+                    real logKb, real logvB,
+                    real time,
+                    real t0,
+                    real A, real B, real C,
+                    real alpha, real beta, real gamma,
+                    real ti, real bloodval) {
+
+    real K1;
+    real k2;
+    real k3;
+    real k4;
+    real Vnd;
+    real BPnd;
+    real Kb;
+    real vB;
+
+    real Th1;
+    real Th2;
+    real Ph1;
+    real Ph2;
+
+    real tcorr;
+
+    real pred;
+
+
+
+    K1 = exp(logK1);
+    Vnd = exp(logVnd);
+    BPnd = exp(logBPnd);
+    k4 = exp(logk4);
+    Kb = exp(logKb);
+    vB = exp(logvB);
+
+    k2 = K1 / Vnd;
+    k3 = k4 * BPnd;
+
+    Th1 = 0.5 * (k2 + k3 + k4 + sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+    Th2 = 0.5 * (k2 + k3 + k4 - sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+
+    Ph1 = (K1 * (Th1 - k3 - k4))/(Th1 - Th2);
+    Ph2 = (K1 * (k3 + k4 - Th2))/(Th1 - Th2);
+
+    tcorr = time - t0;
+
+  pred =  
+  (1-vB) * (
+    (tcorr > 0) * (             // Before t0 equal to 0
+
+      // 2TC
+      (
+        // Before t0+ti
+        (tcorr < ti)*(1/ti)*(
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        ) +
+
+        // After t0+ti
+        (tcorr >= ti)*(1/ti)* (
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2) -
+            Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        )
+      )
+    )
+  ) +
+  // Blood contribution
+  vB * (
+    bloodval +
+    // Kb
+    (tcorr > 0) * (
+      Kb * Integral_FengConv(tcorr, A, B, C, alpha, beta, gamma,
+                                 ti)
+    )
+  );
+
+  return(pred);
+}
+
+real twotcm1k_log_stan2(real logK1, real logVnd, real logBPnd, real logk4,
+                    real logKb, real logvB,
+                    real time,
+                    real t0,
+                    real A, real B, real C,
+                    real alpha, real beta, real gamma,
+                    real ti, real bloodval) {
+
+    real K1;
+    real k2;
+    real k3;
+    real k4;
+    real Vnd;
+    real BPnd;
+    real Kb;
+    real vB;
+
+    real Th1;
+    real Th2;
+    real Ph1;
+    real Ph2;
+
+    real tcorr;
+
+    real pred;
+
+
+
+    K1 = exp(logK1);
+    Vnd = exp(logVnd);
+    BPnd = exp(logBPnd);
+    k4 = exp(logk4);
+    Kb = exp(logKb);
+    vB = exp(logvB);
+
+    k2 = K1 / Vnd;
+    k3 = k4 * BPnd;
+
+    Th1 = 0.5 * (k2 + k3 + k4 + sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+    Th2 = 0.5 * (k2 + k3 + k4 - sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+
+    Ph1 = (K1 * (Th1 - k3 - k4))/(Th1 - Th2);
+    Ph2 = (K1 * (k3 + k4 - Th2))/(Th1 - Th2);
+
+    tcorr = time - t0;
+
+  pred =  
+  (1-vB) * (
+    (tcorr > 0) * (             // Before t0 equal to 0
+
+      // 2TC
+      (
+        // Before t0+ti
+        (tcorr < ti)*(1/ti)*(
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        ) +
+
+        // After t0+ti
+        (tcorr >= ti)*(1/ti)* (
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2) -
+            Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        )
+      ) +
+      
+      // Kb
+      Kb * Integral_FengConv(tcorr, A, B, C, alpha, beta, gamma, ti)
+      )
+  ) +
+  // Blood contribution
+  vB *  bloodval;
+
+  return(pred);
+}
+real twotcm1k_log_stan_mix(real logK1, real logVnd, real logBPnd, real logk4,
+                    real logKb, real logvB,
+                    real logBPnddiff, real logk4diff, real logKbdiff,
+                    real prophigh, real proplow,
+                    real time,
+                    real t0,
+                    real A, real B, real C,
+                    real alpha, real beta, real gamma,
+                    real ti, real bloodval) {
+
+    real K1;
+    real k2;
+    real k3;
+    real k4;
+    real Vnd;
+    real BPnd;
+    real Kb;
+    real vB;
+
+    real Th1;
+    real Th2;
+    real Ph1;
+    real Ph2;
+    
+    real Th1low;
+    real Th2low;
+    real Ph1low;
+    real Ph2low;
+
+    real tcorr;
+
+    real predhigh;
+    real predlow;
+    real pred;
+    
+    real BPndlow;
+    real k4low;
+    real Kblow;
+    real k3low;
+
+
+    K1 = exp(logK1);
+    Vnd = exp(logVnd);
+    vB = exp(logvB);
+
+    // High
+    BPnd = exp(logBPnd);
+    k4 = exp(logk4);
+    Kb = exp(logKb);
+
+
+    k2 = K1 / Vnd;
+    k3 = k4 * BPnd;
+    
+    Th1 = 0.5 * (k2 + k3 + k4 + sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+    Th2 = 0.5 * (k2 + k3 + k4 - sqrt((k2 + k3 + k4)^2 - 4 * k2 * k4));
+
+    Ph1 = (K1 * (Th1 - k3 - k4))/(Th1 - Th2);
+    Ph2 = (K1 * (k3 + k4 - Th2))/(Th1 - Th2);
+    
+    // Low
+    BPndlow = exp(logBPnd + logBPnddiff);
+    k4low = exp(logk4 + logk4diff);
+    Kblow = exp(logKb + logKbdiff);
+    
+    k3low = k4low * BPndlow;
+    
+    Th1low = 0.5 * (k2 + k3low + k4low + sqrt((k2 + k3low + k4low)^2 - 4 * k2 * k4low));
+    Th2low = 0.5 * (k2 + k3low + k4low - sqrt((k2 + k3low + k4low)^2 - 4 * k2 * k4low));
+
+    Ph1low = (K1 * (Th1low - k3low - k4low))/(Th1low - Th2low);
+    Ph2low = (K1 * (k3low + k4low - Th2low))/(Th1low - Th2low);
+
+    
+
+    tcorr = time - t0;
+
+  predhigh =  
+  (1-vB) * (
+    (tcorr > 0) * (             // Before t0 equal to 0
+
+      // 2TC
+      (
+        // Before t0+ti
+        (tcorr < ti)*(1/ti)*(
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        ) +
+
+        // After t0+ti
+        (tcorr >= ti)*(1/ti)* (
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2) -
+            Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma,
+                           Th1, Th2, Ph1, Ph2)
+        )
+      ) +
+      
+      // Kb
+      Kb * Integral_FengConv(tcorr, A, B, C, alpha, beta, gamma, ti)
+      )
+  ) +
+  // Blood contribution
+  vB *  bloodval;
+  
+  predlow =  
+  (1-vB) * (
+    (tcorr > 0) * (             // Before t0 equal to 0
+
+      // 2TC
+      (
+        // Before t0+ti
+        (tcorr < ti)*(1/ti)*(
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1low, Th2low, Ph1low, Ph2low)
+        ) +
+
+        // After t0+ti
+        (tcorr >= ti)*(1/ti)* (
+          Integral_Feng_2TC(tcorr, A, B, C, alpha, beta, gamma,
+                           Th1low, Th2low, Ph1low, Ph2low) -
+            Integral_Feng_2TC(tcorr - ti, A, B, C, alpha, beta, gamma,
+                           Th1low, Th2low, Ph1low, Ph2low)
+        )
+      ) +
+      
+      // Kb
+      Kblow * Integral_FengConv(tcorr, A, B, C, alpha, beta, gamma, ti)
+      )
+  ) +
+  // Blood contribution
+  vB *  bloodval;
+
+  pred = ( prophigh * predhigh ) + ( proplow * predlow );
+
+  return(pred);
+}
+
+"
+```
+
+## One TAC
+```{r}
+dat_i <- simba_modeldat %>% 
+  filter(sub==sample(sub, 1)) %>% 
+  filter(ses == ses[1]) %>% 
+  filter(Region=="Frontal") %>% 
+  mutate(sqrtinvw = sqrt(1/weights)) 
+```
+
+```{r}
+set.seed(1337)
+
+two1k_prior <- c(
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 0.5, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 1)", dpar = "sigma", coef="sqrtinvw"))
+
+
+two1k_formula <- bf( TAC ~ twotcm1k_log_stan2(logK1, logVnd, logBPnd, logk4, logKb, 
+                                                 logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+     sigma ~ 0 + sqrtinvw,
+     # Nonlinear variables
+     logK1 + logVnd + logBPnd + logk4 + logKb + logvB ~ 1,
+     # Nonlinear fit
+     nl = TRUE)
+
+get_prior(two1k_formula, data=dat_i, family = gaussian())
+
+make_stancode(two1k_formula,
+  family=gaussian(), 
+  data = dat_i,
+  prior = two1k_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+
+# get_prior(twotcm_fit_formula,
+#   family=gaussian(), 
+#   data = modeldat)
+
+    
+fit_one <- brm(
+  two1k_formula,
+  family=gaussian(),
+  data = dat_i,
+  prior = two1k_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan,
+             block="functions"),
+  control = list(adapt_delta=0.90),
+  chains = 3, threads=threading(3),
+  cores = 3,
+  iter = 1000,
+  backend = "rstan", init = 0)
+
+  
+
+summary(fit_one)
+```
+
+```{r}
+brms::expose_functions(fit_one, vectorize=TRUE)
+```
+
+
+```{r}
+pred <- predict(fit_one) %>% 
+  as_tibble() %>% 
+  select(P_L95 = "Q2.5",
+         P_U95 = "Q97.5")
+
+fitted <- fitted(fit_one) %>% 
+  as_tibble() %>% 
+  select(Estimate, 
+         F_L95 = "Q2.5",
+         F_U95 = "Q97.5")
+
+dat_i_fitted <- dat_i %>% 
+  select(-c( F_L95,  F_U95,  P_L95,  P_U95, Estimate)) %>% 
+  bind_cols(pred) %>% 
+  bind_cols(fitted)
+
+ggplot(dat_i_fitted, aes(x=t_tac, y=TAC)) +
+  geom_point() +
+  geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.1) +
+  geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.2) +
+  geom_line(aes(y=Estimate)) 
+
+```
+
+
+## One TAC Gamma
+```{r}
+dat_i <- simba_modeldat %>% 
+  filter(sub==sample(sub, 1)) %>% 
+  filter(ses == ses[1]) %>% 
+  filter(Region=="Frontal") %>% 
+  mutate(sqrtinvw = sqrt(1/weights)) %>% 
+  filter(TAC > 0)
+```
+
+```{r}
+set.seed(1337)
+
+two1k_prior <- c(
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 0.5, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"))
+
+
+two1k_formula <- bf( TAC ~ twotcm1k_log_stan2(logK1, logVnd, logBPnd, logk4, logKb, 
+                                                 logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+     # Nonlinear variables
+     logK1 + logVnd + logBPnd + logk4 + logKb + logvB ~ 1,
+     # Nonlinear fit
+     nl = TRUE)
+
+get_prior(two1k_formula, data=dat_i, family=Gamma(link="identity"))
+
+make_stancode(two1k_formula,
+  family=Gamma(link="identity"), 
+  data = dat_i,
+  prior = two1k_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+
+# get_prior(twotcm_fit_formula,
+#   family=gaussian(), 
+#   data = modeldat)
+
+    
+fit_one_gamma <- brm(
+  two1k_formula,
+  family=Gamma(link="identity"), 
+  data = dat_i,
+  prior = two1k_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan,
+             block="functions"),
+  control = list(adapt_delta=0.90),
+  chains = 3, threads=threading(3),
+  cores = 3,
+  iter = 1000,
+  backend = "rstan", init = 0)
+
+  
+
+summary(fit_one_gamma)
+```
+
+```{r}
+brms::expose_functions(fit_one, vectorize=TRUE)
+```
+
+
+```{r}
+pred <- predict(fit_one) %>% 
+  as_tibble() %>% 
+  select(P_L95 = "Q2.5",
+         P_U95 = "Q97.5")
+
+fitted <- fitted(fit_one) %>% 
+  as_tibble() %>% 
+  select(Estimate, 
+         F_L95 = "Q2.5",
+         F_U95 = "Q97.5")
+
+dat_i_fitted <- dat_i %>% 
+  select(-c( F_L95,  F_U95,  P_L95,  P_U95, Estimate)) %>% 
+  bind_cols(pred) %>% 
+  bind_cols(fitted)
+
+ggplot(dat_i_fitted, aes(x=t_tac, y=TAC)) +
+  geom_point() +
+  geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.1) +
+  geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.2) +
+  geom_line(aes(y=Estimate)) 
+
+```
+
+
+
+
+
+
+
+
+## Model
+
+```{r}
+simba_fit_formula <- bf( TAC ~ twotcm1k_log_stan2(logK1, logVnd, logBPnd, logk4, 
+                                                  logKb,
+                                                  logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac, bs="cr") + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + Genotype + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + Genotype + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logKb ~ 1 + Genotype + (1|k|ID) + (1|m|Region) + 
+                                  (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 0.5, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.5)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logKb", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+   
+  set_prior("normal(0, 1 )", coef="GenotypeMAB", nlpar="logBPnd"),
+  set_prior("normal(0, 1 )", coef="GenotypeLAB", nlpar="logBPnd"),
+  
+  set_prior("normal(0, 1 )", coef="GenotypeMAB", nlpar="logk4"),
+  set_prior("normal(1, 1 )", coef="GenotypeLAB", nlpar="logk4"),
+  
+  set_prior("normal(-0.5, 0.5 )", coef="GenotypeMAB", nlpar="logKb"),
+  set_prior("normal(-1.5, 0.5 )", coef="GenotypeLAB", nlpar="logKb"),
+
+  set_prior("normal(-1, 0.5)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+fit2_bpnd <- brm(
+  simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+             block="functions"),
+  backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+  chains=2, cores=2, threads = threading(6), seed =  12345)
+  
+saveRDS(fit2_bpnd, "../DerivedData/pbr28_2tc1k_fit2.rds")
+
+```
+
+```{r}
+fit2_bpnd <- readRDS("../DerivedData/pbr28_2tc1k_fit2.rds")
+print(summary(fit2_bpnd, digits=3))
+```
+
+
+
+
+## Model Small Data
+
+```{r}
+simba_fit_formula <- bf( TAC ~ twotcm1k_log_stan2(logK1, logVnd, logBPnd, logk4, 
+                                                  logKb,
+                                                  logvB, t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac, bs="cr") + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + Genotype + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + Genotype + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logKb ~ 1 + Genotype + (1|k|ID) + (1|m|Region) + 
+                                  (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 0.5, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.5)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logKb", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+   
+  set_prior("normal(0, 1 )", coef="GenotypeMAB", nlpar="logBPnd"),
+  set_prior("normal(0, 1 )", coef="GenotypeLAB", nlpar="logBPnd"),
+  
+  set_prior("normal(0, 1 )", coef="GenotypeMAB", nlpar="logk4"),
+  set_prior("normal(1, 1 )", coef="GenotypeLAB", nlpar="logk4"),
+  
+  set_prior("normal(-0.5, 0.5 )", coef="GenotypeMAB", nlpar="logKb"),
+  set_prior("normal(-1.5, 0.5 )", coef="GenotypeLAB", nlpar="logKb"),
+
+  set_prior("normal(-1, 0.5)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat_small, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat_small,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat_small,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+fit2_bpnd <- brm(
+  simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat_small,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+             block="functions"),
+  backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+  chains=2, cores=2, threads = threading(6), seed =  12345)
+  
+saveRDS(fit2_bpnd, "../DerivedData/pbr28_2tc1k_fit2_small.rds")
+
+```
+
+```{r}
+fit2_bpnd <- readRDS("../DerivedData/pbr28_2tc1k_fit2_small.rds")
+print(summary(fit2_bpnd, digits=3))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Preds
+
+```{r}
+# writeLines(brms::stancode(fit2_bpnd), con = "stancode.stan")
+# expose_stan_functions(rstan::stan_model("stancode.stan"))
+
+priorfit <- brm(
+    simba_fit_formula,
+    family=gaussian(),
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan,
+               block="functions"),
+    backend = "rstan", init = 0, iter = 100,
+    chains=1, cores=1, seed = 753273, sample_prior = "only")
+
+brms::expose_functions(priorfit, vectorize=TRUE, verbose = F, 
+                       show_compiler_warnings = F)
+
+preds <- predict(fit2_bpnd)
+fitted <- fitted(fit2_bpnd)
+looic <- loo(fit2_bpnd)
+  
+saveRDS(preds, "../DerivedData/pbr28_preds_mod2.rds")
+saveRDS(fitted, "../DerivedData/pbr28_fitted_mod2.rds")
+saveRDS(looic, "../DerivedData/pbr28_loo_mod2.rds")
+```
+
+## Plots
+
+```{r}
+preds <- readRDS("../DerivedData/pbr28_preds_mod2.rds")
+fitted <- readRDS("../DerivedData/pbr28_fitted_mod2.rds")
+ps_loo <- readRDS("../DerivedData/pbr28_loo_mod2.rds")
+
+simba_modeldat$P_L95 <- preds[,3]
+simba_modeldat$P_U95 <- preds[,4]
+simba_modeldat$F_L95 <- fitted[,3]
+simba_modeldat$F_U95 <- fitted[,4]
+simba_modeldat$Estimate <- fitted[,1]
+```
+
+```{r, fig.height=9, fig.width=12}
+library(ggsci)
+
+check_some_fits <- function(modeldat, sampleid) {
+
+    checkdat <- modeldat %>%
+        filter(PET_Genotype == sampleid)
+
+    ggplot(checkdat, aes(x=t_tac, y=TAC, colour=Region, fill=Region)) +
+        geom_point(colour="black", size=2) +
+        geom_point(size=1.5) +
+        geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.3) +
+        geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.3) +
+        geom_line(aes(y=Estimate)) +
+        facet_wrap(~Region, scales="free", ncol=3) +
+        scale_colour_manual(values=pal_npg("nrc", alpha = 1)(10)[1:12]) +
+        scale_fill_manual(values=pal_npg("nrc", alpha = 0.3)(10)[1:12]) +
+        labs(y=expression(paste("Radioactivity (kBq/cc)", sep="")),
+             x="Time (min)",
+             title = sampleid) +
+      coord_cartesian(ylim=c(0,max(checkdat$TAC)*1.3))
+
+}
+
+simba_modeldat$PET_Genotype <- paste(simba_modeldat$PET, simba_modeldat$Genotype)
+
+ids <- unique(simba_modeldat$PET_Genotype) #sample(unique(modeldat$ID), 5)
+
+map(ids, ~check_some_fits(simba_modeldat, .x))
+```
+
+
+```{r}
+brms::conditional_smooths(fit2_bpnd)
+```
+
+## LOO
+
+
+```{r}
+loo_2tc1k <- readRDS("../DerivedData/pbr28_loo_mod2.rds")
+loo_2tc1k
+```
+
+
+```{r}
+loo_2tc1k_inf <- simba_modeldat %>% 
+  mutate(loo_k = loo::pareto_k_influence_values(loo_2tc1k))
+
+loo_2tc1k_inf %>% 
+  select(sub, ses, study, Region, frame_start, loo_k) %>% 
+  arrange(-loo_k)
+
+kv <- loo_2tc1k_inf %>% filter(loo_k > 0.7) 
+table(kv$sub, kv$ses)
+table(kv$Region)
+```
+
+
+# Model 3: 2TC1K mixture, Kb outside vB
+
+```{r}
+simba_modeldat <- simba_modeldat %>% 
+  mutate(prophigh = case_when(
+    Genotype=="HAB" ~ 1,
+    Genotype=="MAB" ~ 0.5,
+    Genotype=="LAB" ~ 0,
+  ),
+  proplow = 1-prophigh)
+
+simba_modeldat_small <- simba_modeldat %>% 
+  filter(sub <= 10)
+```
+
+
+## Model
+
+```{r}
+simba_fit_formula <-bf( TAC ~ twotcm1k_log_stan_mix(
+                                    logK1, logVnd, logBPnd, logk4,
+                                    logKb, logvB, 
+                                    logBPnddiff, logk4diff, logKbdiff,
+                                    prophigh, proplow,
+                                    t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac) + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logKb ~ 1 + (1|k|ID) + (1|m|Region) + 
+                                  (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              logBPnddiff ~ 1,
+                              logk4diff ~ 1,
+                              logKbdiff ~ 1,
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 1, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.7)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.7)", nlpar = "logKb", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logKb", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+  
+  set_prior("normal(0, 0.5)", nlpar = "logBPnddiff"),
+  set_prior("normal(0, 0.5)", nlpar = "logk4diff"),
+  set_prior("normal(0, 0.5)", nlpar = "logKbdiff"),
+
+  set_prior("normal(-1, 0.2)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+fit3_bpnd <- brm(
+  simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+             block="functions"),
+  backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+  chains=2, cores=2, threads = threading(6), seed =  9)
+  
+saveRDS(fit3_bpnd, "../DerivedData/pbr28_2tc1k_fit3.rds")
+
+```
+
+```{r}
+fit3_bpnd <- readRDS("../DerivedData/pbr28_2tc1k_fit3.rds")
+print(summary(fit3_bpnd, digits=3))
+```
+
+
+
+## Model Small Data
+
+```{r}
+simba_fit_formula <-bf( TAC ~ twotcm1k_log_stan_mix(
+                                    logK1, logVnd, logBPnd, logk4,
+                                    logKb, logvB, 
+                                    logBPnddiff, logk4diff, logKbdiff,
+                                    prophigh, proplow,
+                                    t_tac, 
+                                    t0, 
+                                    A, B, C, 
+                                    alpha, beta, gamma, 
+                                    ti, meanblood),
+                              lf(sigma ~ 1 + s(t_tac) + logRegSize_c + 
+                                   logdur_c +
+                                 (1 | Region) + (1 | PET), center = FALSE),
+                              # Nonlinear variables
+                              logK1 ~ 1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logBPnd ~  1 + Region + (1|k|ID) + 
+                                  (1|l|PET:Region),
+                              logVnd ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logk4 ~ 1 + (1|m|Region) + (1|k|ID) +
+                                (1|l|PET:Region),
+                              logKb ~ 1 + (1|k|ID) + (1|m|Region) + 
+                                  (1|l|PET:Region),
+                              logvB ~ 1 + (1|ID) + (1|Region),
+                              logBPnddiff ~ 1,
+                              logk4diff ~ 1,
+                              logKbdiff ~ 1,
+                              # Nonlinear fit
+                              nl = TRUE, center = TRUE)
+  
+simba_prior <- c(
+  
+  set_prior("normal(  -2, 0.50)", nlpar = "logK1"),
+  set_prior("normal(-0.5, 0.50)", nlpar = "logVnd"),
+  set_prior("normal( 1, 0.50)", nlpar = "logBPnd"),
+  set_prior("normal(  -3, 0.50)", nlpar = "logk4"),
+  set_prior("normal(  -5, 0.50)", nlpar = "logKb"),
+  set_prior("normal(  -3, 0.25)", nlpar = "logvB"),
+  
+  set_prior("normal(0, 0.3)", nlpar = "logK1", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.7)", nlpar = "logBPnd", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="ID"),
+  set_prior("normal(0, 0.7)", nlpar = "logKb", class = "sd", group="ID"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="ID"),
+  
+  set_prior("normal(0, 0.05)", nlpar = "logK1", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logVnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logBPnd", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logk4", class = "sd", group="PET:Region"),
+  set_prior("normal(0, 0.05)", nlpar = "logKb", class = "sd", group="PET:Region"),
+  
+  set_prior("normal(0, 0.1)", nlpar = "logVnd", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logk4", class = "sd", group="Region"),
+  set_prior("normal(0, 0.1)", nlpar = "logvB", class = "sd", group="Region"),
+  set_prior("normal(0, 0.3)", nlpar = "logKb", class = "sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logK1"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logK1"),
+  
+  set_prior("normal(0, 0.3)", coef="RegionAccumbens",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionAmygdala",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionCaudate",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionHippocampus",  nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionOccipital",    nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionParietal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionPutamen",      nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionTemporal",     nlpar="logBPnd"),
+  set_prior("normal(0, 0.3)", coef="RegionThalamus",     nlpar="logBPnd"),
+  
+  set_prior("normal(0, 0.5)", nlpar = "logBPnddiff"),
+  set_prior("normal(0, 0.5)", nlpar = "logk4diff"),
+  set_prior("normal(0, 0.5)", nlpar = "logKbdiff"),
+
+  set_prior("normal(-1, 0.2)", dpar = "sigma"),
+  set_prior("normal(0, 0.5)", dpar = "sigma", class="sd", group="PET"),
+  set_prior("normal(0, 0.1)", dpar = "sigma", class="sd", group="Region"),
+  
+  set_prior("normal(0, 0.3)", coef="logRegSize_c", dpar = "sigma", class="b"),
+  set_prior("normal(0, 0.3)", coef="logdur_c", dpar = "sigma", class="b"),
+  
+  set_prior("student_t(3, 0, 2.5)", coef="st_tac_1", dpar = "sigma", class="b"),
+  set_prior("student_t(3, 0, 2.5)", dpar = "sigma", class="sds"),
+  
+  set_prior("lkj(1)", class="cor", group = "ID"),
+  set_prior("lkj(2)", class="cor", group = "Region"),
+  set_prior("lkj(2)", class="cor", group = "PET:Region"))
+
+
+stand <- brms::make_standata(simba_fit_formula, 
+                          data = simba_modeldat_small, 
+                          family=gaussian(), 
+                          prior = simba_prior)
+
+stand_list <- list()
+for (t in names(stand)) {
+  stand_list[[t]] <- stand[[t]]
+}
+
+sc <- make_stancode(simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat_small,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+                     block="functions"))
+
+writeLines(sc, con = "stancode.stan")
+```
+
+```{r}
+empty_fit <- brm(
+    simba_fit_formula,
+    family=gaussian(), 
+    data = simba_modeldat_small,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+               block="functions"),
+    backend = "cmdstanr", init = 0, empty = TRUE)
+
+prior_summary(empty_fit)
+```
+
+```{r}
+fit3_bpnd <- brm(
+  simba_fit_formula,
+  family=gaussian(), 
+  data = simba_modeldat_small,
+  prior = simba_prior,
+  stanvars = stanvar(scode = two_compartment_1k_fengconv_stan, 
+             block="functions"),
+  backend = "cmdstanr", init = 0, iter = 1000, warmup = 300,
+  chains=2, cores=2, threads = threading(6), seed =  9)
+  
+saveRDS(fit3_bpnd, "../DerivedData/pbr28_2tc1k_fit3.rds")
+
+```
+
+```{r}
+fit3_bpnd <- readRDS("../DerivedData/pbr28_2tc1k_fit3.rds")
+print(summary(fit3_bpnd, digits=3))
+```
+
+
+
+## Preds
+
+```{r}
+# writeLines(brms::stancode(fit3_bpnd), con = "stancode.stan")
+# expose_stan_functions(rstan::stan_model("stancode.stan"))
+
+priorfit <- brm(
+    simba_fit_formula,
+    family=gaussian(),
+    data = simba_modeldat,
+    prior = simba_prior,
+    stanvars = stanvar(scode = two_compartment_1k_fengconv_stan,
+               block="functions"),
+    backend = "rstan", init = 0, iter = 100,
+    chains=1, cores=1, seed = 753273, sample_prior = "only")
+
+brms::expose_functions(priorfit, vectorize=TRUE, verbose = F, 
+                       show_compiler_warnings = F)
+
+preds <- predict(fit3_bpnd)
+fitted <- fitted(fit3_bpnd)
+looic <- loo(fit3_bpnd)
+  
+saveRDS(preds, "../DerivedData/pbr28_preds_mod3.rds")
+saveRDS(fitted, "../DerivedData/pbr28_fitted_mod3.rds")
+saveRDS(looic, "../DerivedData/pbr28_loo_mod3.rds")
+```
+
+## Plots
+
+```{r}
+preds <- readRDS("../DerivedData/pbr28_preds_mod3.rds")
+fitted <- readRDS("../DerivedData/pbr28_fitted_mod3.rds")
+ps_loo <- readRDS("../DerivedData/pbr28_loo_mod3.rds")
+
+simba_modeldat$P_L95 <- preds[,3]
+simba_modeldat$P_U95 <- preds[,4]
+simba_modeldat$F_L95 <- fitted[,3]
+simba_modeldat$F_U95 <- fitted[,4]
+simba_modeldat$Estimate <- fitted[,1]
+```
+
+```{r, fig.height=9, fig.width=12}
+library(ggsci)
+
+check_some_fits <- function(modeldat, sampleid) {
+
+    checkdat <- modeldat %>%
+        filter(PET_Genotype == sampleid)
+
+    ggplot(checkdat, aes(x=t_tac, y=TAC, colour=Region, fill=Region)) +
+        geom_point(colour="black", size=2) +
+        geom_point(size=1.5) +
+        geom_ribbon(aes(ymin=P_L95, ymax=P_U95), alpha=0.3) +
+        geom_ribbon(aes(ymin=F_L95, ymax=F_U95), alpha=0.3) +
+        geom_line(aes(y=Estimate)) +
+        facet_wrap(~Region, scales="free", ncol=3) +
+        scale_colour_manual(values=pal_npg("nrc", alpha = 1)(10)[1:12]) +
+        scale_fill_manual(values=pal_npg("nrc", alpha = 0.3)(10)[1:12]) +
+        labs(y=expression(paste("Radioactivity (kBq/cc)", sep="")),
+             x="Time (min)",
+             title = sampleid)
+
+}
+
+simba_modeldat$PET_Genotype <- paste(simba_modeldat$PET, simba_modeldat$Genotype)
+
+ids <- unique(simba_modeldat$PET_Genotype) #sample(unique(modeldat$ID), 5)
+
+map(ids, ~check_some_fits(simba_modeldat, .x))
+```
+
+
+```{r}
+brms::conditional_smooths(fit3_bpnd)
+```
+
+## LOO
+
+
+```{r}
+loo_2tc1k <- readRDS("../DerivedData/pbr28_loo_mod3.rds")
+loo_2tc1k
+```
+
+
+```{r}
+loo_2tc1k_inf <- simba_modeldat %>% 
+  mutate(loo_k = loo::pareto_k_influence_values(loo_2tc1k))
+
+loo_2tc1k_inf %>% 
+  select(sub, ses, study, Region, frame_start, loo_k) %>% 
+  arrange(-loo_k)
+
+kv <- loo_2tc1k_inf %>% filter(loo_k > 0.7) 
+table(kv$sub, kv$ses)
+table(kv$Region)
+```
+
+
+
+
+
+
+
+
