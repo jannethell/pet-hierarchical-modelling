@@ -1,0 +1,736 @@
+---
+title: "Extract PET Study Data"
+output: html_document
+---
+
+#Load packages
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(janitor)
+library(lubridate)
+library(readr)
+library(tools)
+library(stringr)
+library(fs)
+library(glue)
+library(purrr)
+library(jsonlite)
+library(kinfitr)
+library(bloodstream)
+```
+
+#Structure
+##Load given data (datasets)
+```{r}
+data_folders <- list.dirs(
+  path = "/home/jan-erik/Repositories/BIDS_Sourcedata/KIH11004", 
+  recursive = FALSE,
+  full.names = TRUE
+)
+
+real_subjects <- keep(data_folders, ~ file.exists(file.path(.x, "studyDB.mat")))
+
+extract_info <- function(folder) {
+  file_path <- file.path(folder, "study_variables.txt")
+  
+  if (!file.exists(file_path)) {
+    return(tibble(
+      acronym = basename(folder),
+      dp1 = NA,
+      dp2 = NA,
+      mr = NA,
+    ))
+  }
+  
+lines <- readLines(file_path)
+  
+    subject_line <- str_subset(lines, "^SubjectName\\s+")
+    acronym <- if (length(subject_line) > 0) {
+    str_split(subject_line, "\\s+", simplify = TRUE)[1, 2]
+  } else {
+    basename(folder)
+  }
+  
+  dp1 <- str_extract(str_subset(lines, "dynpet1"), "\\S+\\.v$")
+  dp2 <- str_extract(str_subset(lines, "dynpet2"), "\\S+\\.v$")
+  mr_date <- str_extract(str_subset(lines, "mr_date"), "\\d{8}")  
+  
+  tibble(
+    acronym = acronym,
+    dp1 = ifelse(length(dp1) > 0, dp1, NA),
+    dp2 = ifelse(length(dp2) > 0, dp2, NA),
+    mr = ifelse(length(mr_date) > 0, mr_date, NA),
+  )
+}
+
+subject_data <- map_dfr(real_subjects, extract_info)
+
+sub_mapping <- subject_data %>%
+  distinct(acronym) %>%
+  arrange(acronym) %>%
+  mutate(sub = sprintf("sub-%02d", row_number()))
+
+
+write_csv(sub_mapping, "../DerivedData/sub_mapping_KIH11004.csv")
+
+
+subject_data <- left_join(subject_data, sub_mapping, by = "acronym")
+
+print(subject_data)
+```
+
+###Demographic File from All_PBR28.xlsx + genotyhpesKIH11004.xlsx
+```{r create big demog}
+all_raw_main <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/All_PBR28.xlsx") %>%
+  clean_names()
+
+sub_mapping <- sub_mapping %>%
+  rename(acronym = acronym) %>%
+  mutate(acronym = tolower(acronym))
+
+sub_demog_main <- all_raw_main %>%
+  mutate(acronym = tolower(acronym)) %>%
+  filter(!is.na(acronym), !is.na(study), study == "KIH11004") %>%
+  left_join(sub_mapping) %>%
+  transmute(
+    sub,
+    acronym,
+    study,
+    patient_description = cfs_allergi_ra_pope,
+    hc_pat = hc_pat,
+    pet_date = pet_date,
+    weight = weight_kg,
+    MBq = m_bq,
+    comments = comments,
+  )
+
+genotype_raw <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/genotypesKIH11004.xlsx") %>%
+  clean_names()
+
+sub_demog_genotype <- genotype_raw %>%
+  filter(!is.na(acronym)) %>%
+  mutate(acronym = tolower(acronym)) %>%
+  left_join(sub_mapping) %>%
+  transmute(
+    sub,
+    acronym,
+    study = "KIH11004",
+    patient_description = ctr_pat,
+    hc_pat = if_else(ctr_pat == "ctr", "HC", "Pat"),
+    pet_date = pet_date,
+    genotype = genotype,
+    weight = NA,
+    MBq = NA,
+    comments = NA
+  )
+
+sub_demog <- full_join(sub_demog_main, sub_demog_genotype, by = c("acronym", "sub")) %>%
+  transmute(
+    sub,
+    acronym,
+    study = coalesce(study.x, study.y),
+    patient_description = coalesce(patient_description.x, patient_description.y),
+    hc_pat = coalesce(hc_pat.x, hc_pat.y),
+    pet_date = coalesce(pet_date.x, pet_date.y),
+    weight = coalesce(weight.x, weight.y),
+    MBq = coalesce(MBq.x, MBq.y),
+    genotype = genotype,
+    comments = coalesce(comments.x, comments.y)
+  )
+
+write_csv(sub_demog, "../DerivedData/sub_demog_KIH11004.csv")
+```
+
+####PET Specific Demog
+```{r create PET demog}
+sub_demog_pet <- subject_data %>%
+  mutate(acronym = tolower(acronym)) %>%  
+  pivot_longer(cols = c(dp1, dp2), names_to = "ses", values_to = "v_file") %>%
+  mutate(
+    ses = str_remove(ses, "dp"),
+    ses = as.integer(ses)
+  ) %>%
+  filter(!is.na(v_file)) %>%
+  left_join(sub_mapping) %>%
+  left_join(sub_demog) %>%
+  select(sub, acronym, ses, v_file, pet_date, weight, MBq, comments, hc_pat, patient_description)
+
+write_csv(sub_demog_pet, "../DerivedData/sub_demog_pet_KIH11004.csv")
+```
+
+####MR Specific Demog
+```{r create MR demog}
+sub_demog_mr <- subject_data %>%
+  mutate(acronym = tolower(acronym)) %>% 
+  left_join(sub_mapping) %>%
+  left_join(sub_demog) %>% 
+  select(sub, acronym, mr, study)
+
+write_csv(sub_demog_mr, "../DerivedData/sub_demog_mr_KIH11004.csv")
+```
+
+####Create Sub-XX-folder structure (including anat and pet folders inside each sub-XX-folder) 
+```{r, eval=FALSE}
+bids_base <- "../../BIDS/KIH11004/"
+sub_mapping %>%
+  pull(sub) %>%
+  walk(function(subfolder) {
+    dir_create(file.path(bids_base, subfolder, "anat"), recurse = TRUE)
+    dir_create(file.path(bids_base, subfolder, "pet"), recurse = TRUE)
+  })
+```
+
+
+##Adding .dcm to files without it
+```{r add-dcm-extension-generalised, message=TRUE}
+base_path <- "/home/jan-erik/Repositories/BIDS_Sourcedata"
+study_path <- file.path(base_path, "KIH11004")
+
+
+actual_dirs <- list.dirs(study_path, recursive = FALSE, full.names = FALSE)
+
+acronym_lookup <- tibble(
+  acronym = tolower(actual_dirs),
+  folder_name = actual_dirs
+)
+
+
+dicom_roots <- sub_demog_mr %>%
+  filter(study == "KIH11004") %>%
+  mutate(acronym = tolower(acronym)) %>%
+  left_join(acronym_lookup) %>%  
+  mutate(
+    dicom_root = file.path(base_path, study, folder_name, "raw", "mr_dicom")
+  ) %>%
+  pull(dicom_root)
+
+
+add_dcm_extension_recursive <- function(path) {
+  if (!dir_exists(path)) {
+    message(glue("Skipped: map doesn't exist: {path}"))
+    return()
+  }
+
+  files <- fs::dir_ls(path, recurse = TRUE, type = "file")
+  files_no_ext <- files[!str_detect(path_ext(files), "\\w+")]
+
+  if (length(files_no_ext) > 0) {
+    message(glue("{length(files_no_ext)} files without extension in: {path}"))
+
+    walk(files_no_ext, function(f) {
+      new_name <- paste0(f, ".dcm")
+      file_move(f, new_name)
+    })
+
+    message("added .dcm")
+  } else {
+    message(glue("no files without .dcm in {path}"))
+  }
+}
+
+
+walk(dicom_roots[file.exists(dicom_roots)], add_dcm_extension_recursive)
+```
+
+#File conversion
+##Dicom to Nifty
+###dcm2niix
+```{r, message=TRUE, eval = FALSE}
+
+checkLines <- TRUE
+
+mr_paths <- sub_demog_mr %>%
+  filter(study == "KIH11004") %>%
+  left_join(sub_mapping) %>%      
+  left_join(subject_data %>%
+  select(acronym, mr))
+
+get_dcm_folder <- function(path) {
+  if (!dir_exists(path)) {
+    message("Path does not exist: ", path)
+    return(NA_character_)
+  }
+
+  direct_dcms <- dir_ls(path, recurse = FALSE, type = "file")
+  if (any(str_detect(direct_dcms, "(?i)\\.dcm$"))) {
+    return(path)
+  }
+
+  t1_dirs <- dir_ls(path, recurse = TRUE, type = "directory") %>%
+    keep(~ str_detect(.x, "(?i)t1"))
+
+  if (length(t1_dirs) == 0) return(NA_character_)
+
+  latest_t1 <- t1_dirs[which.max(fs::file_info(t1_dirs)$modification_time)]
+  return(latest_t1)
+}
+
+mr_paths %>%
+  mutate(
+    dicom_root = file.path(base_path, study, toupper(acronym), "raw", "mr_dicom", mr),
+    t1_folder = map_chr(dicom_root, get_dcm_folder),
+    output_dir = file.path("/home/jan-erik/Repositories/BIDS", study, sub, "anat"),
+    out_name = paste0(sub, "_T1w")
+  ) %>%
+  filter(!is.na(t1_folder)) %>%
+  pwalk(function(t1_folder, output_dir, out_name, sub, ...) {
+    dir_create(output_dir)
+
+    command <- paste0("dcm2niix ",
+                      "-z y ",     # gzip
+                      "-b y ",     # BIDS sidecar
+                      "-ba n ",    # no anonymisation
+                      "-o ", output_dir, " ",
+                      "-f ", out_name, " ",
+                      t1_folder)
+
+    if (checkLines) {
+      message(glue::glue("Would run: {command}"))
+    } else {
+      system(command)
+      message(glue::glue("Done: {sub} -> {out_name}.nii.gz"))
+    }
+  })
+```
+
+###ecatpet2bids
+```{r, message=TRUE, eval = FALSE}
+sub_demog_pet <- read_csv("../DerivedData/sub_demog_pet_KIH11004.csv") %>%
+  filter(sub == "sub-25", ses == 1) %>%
+  mutate(
+    study = "KIH11004",
+    input_path = file.path("/home/jan-erik/Repositories/BIDS_Sourcedata", study, toupper(acronym), "raw", "pet_ecat7", v_file),
+    input_path_docker = file.path("/mnt/Repositories/BIDS_Sourcedata", study, toupper(acronym), "raw", "pet_ecat7", v_file),
+    output_dir = file.path("/home/jan-erik/Repositories/BIDS", study, sub, "pet", paste0("ses-", ses)),
+    output_dir_docker = file.path("/mnt/Repositories/BIDS", study, sub, "pet", paste0("ses-", ses)),
+    out_name = paste0(sub, "_ses-", ses, "_pet.nii.gz")
+  )
+
+script_file <- "ecatpet2bids_script.sh"
+writeLines("#!/bin/bash", script_file)
+
+checkLines <- F # F = exekvera
+
+sub_demog_pet %>%
+  pwalk(function(input_path_docker, output_dir_docker, out_name, output_dir, ...) {
+    
+    cmd <- glue('docker run --rm -v /home/jan-erik/Repositories:/mnt/Repositories pet2bids_container /bin/bash -c \"\n
+    source /opt/conda/etc/profile.d/conda.sh && \\\\\n
+    conda activate PETBIDS && \\\\\n
+    ecatpet2bids {input_path_docker} --convert -n {file.path(output_dir_docker, out_name)}
+\"')
+
+    if (checkLines) {
+      cmd <- paste("echo", cmd)
+    }
+
+    if (file.exists(file.path(output_dir, out_name))) {
+      print(cmd)
+      print("Not executing: file already exists")
+    } else {
+      print(cmd)
+      system(cmd)
+    }
+  })
+```
+
+
+The subjects that we really want the qdaconverted data for:
+ sub_demog_genotype %>% filter(hc_pat=="HC") %>% filter(genotype != "not done") %>% arrange(acronym) %>% pull(acronym)
+```{r}
+sub_demog_HC <- sub_demog_genotype %>% 
+  filter(hc_pat=="HC") %>% 
+  filter(genotype != "not done") %>% 
+  arrange(acronym)
+
+write_csv(sub_demog_HC, "../DerivedData/sub_demog_HC_KIH11004.csv")
+
+```
+
+###Blood
+#### .QDA/.qda-converter (blood data)
+# Bloodfiles HC + Parentfraction HC
+```{r}
+qdafiles_HC %>%
+  mutate(
+    ses = "1",
+    ses_id = glue("ses-{ses}"),
+    fullfilename = file.path("/home/jan-erik/Repositories/BIDS_Sourcedata/KIH11004/blood", glue("{acronym}_blood_qdaconverted.csv")),
+    out_dir = file.path("/home/jan-erik/Repositories/BIDS/KIH11004", sub, ses_id, "pet"),
+    auto_file = file.path(out_dir, glue("{sub}_{ses_id}_recording-autosampler_blood.tsv")),
+    manual_file = file.path(out_dir, glue("{sub}_{ses_id}_recording-manual_blood.tsv")),
+    pf_fullfilename = file.path(
+      "/home/jan-erik/Repositories/BIDS_Sourcedata/KIH11004", 
+      glue("{toupper(acronym)}/modelling/data/Blood_analysis_anton/{acronym}_parent_fraction.txt")
+    )
+  )
+
+View(qdafiles_HC)
+```
+
+####AUTO + MANUAL + PF
+```{r}
+checkLines <- F
+
+#AUTO
+extract_auto_data <- function(fullfilename) {
+  read_csv(fullfilename, show_col_types = FALSE) %>%
+    select(`ABSS sec`, `ABSS count`, `Cbl (uncorr)`) %>%
+    filter(!is.na(`ABSS count`)) %>% 
+    transmute(
+      time = `ABSS sec`,
+      whole_blood_radioactivity = `Cbl (uncorr)` 
+    )
+}
+
+#MANUAL
+extract_manual_data <- function(fullfilename) {
+  read_csv(fullfilename, show_col_types = FALSE) %>% 
+  select(`HK_sa_min`, `HK_sa_sec`, `HK_Cbl`, `HK_Cpl`) %>% 
+  filter(!is.na(`HK_Cpl`)) %>% 
+    transmute( 
+      time = `HK_sa_min`*60 + `HK_sa_sec`,
+      whole_blood_radioactivity = `HK_Cbl`,
+      plasma_radioactivity = `HK_Cpl`
+    )
+}
+
+#PF
+extract_pf_data <- function(pf_filename) {
+  read_delim(pf_filename, delim = "\t", show_col_types = FALSE) %>% 
+    rename(time = 'Time[sec]', metabolite_parent_fraction = 'Parent_fraction[1/1]') 
+}  
+    
+  
+#Merge extract_manual_data + extract_pf_data with left_join as it should match with time 
+extract_combined_manual <- function(fullfilename, pf_filename) {
+  manual <- extract_manual_data(fullfilename)
+  pf <- extract_pf_data(pf_filename)
+  left_join(manual, pf, by = "time")
+}
+
+pmap(
+  list(
+    fullfilename = qdafiles_HC$fullfilename,
+    pf_fullfilename = qdafiles_HC$pf_fullfilename,
+    auto_file = qdafiles_HC$auto_file,
+    manual_file = qdafiles_HC$manual_file,
+    out_dir = qdafiles_HC$out_dir
+  ),
+
+  function(fullfilename, pf_fullfilename, auto_file, manual_file, out_dir) {
+    
+  if (checkLines) {
+      message(glue::glue("  [AUTO]   {auto_file}"))
+      message(glue::glue("  [MANUAL] {manual_file}"))
+    } else {
+      
+      fs::dir_create(out_dir)
+      auto_df <- extract_auto_data(fullfilename)
+      readr::write_tsv(auto_df, auto_file)
+      
+      manual_df <- extract_combined_manual(fullfilename, pf_fullfilename)
+      readr::write_tsv(manual_df, manual_file)
+    }
+  }
+)
+```
+
+#####.Json sidecar (Auto)
+```{r}
+pwalk(
+  list(
+    autosampler_file = qdafiles_HC$auto_file,
+    sub = qdafiles_HC$sub,
+    ses_id = qdafiles_HC$ses_id,
+    out_dir = qdafiles_HC$out_dir
+  ),
+  function(autosampler_file, sub, ses_id, out_dir) {
+    
+    blood_df <- read_tsv(autosampler_file, show_col_types = FALSE)
+ 
+    blood_df$whole_blood_radioactivity <- unit_convert(
+      values = blood_df$whole_blood_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+    
+    json_filename <- glue("sub-{sub}_{ses_id}_recording-autosampler_blood.json")
+    json_path <- file.path(out_dir, json_filename)
+    
+    auto_sidecar <- list(
+      PlasmaAvail = FALSE,
+      MetaboliteAvail = FALSE,
+      WholeBloodAvail = TRUE,
+      DispersionCorrected = FALSE,
+      DispersionConstant = 2.5991,
+      time = list(
+        Description = "Time in relation to time zero defined by the _pet.json",
+        Units = "s"
+      ),
+      whole_blood_radioactivity = list(
+        Description = "Radioactivity in whole blood samples. Measured using Allogg autosampler.",
+        Units = "Bq/mL"
+      )
+    )
+    write_json(auto_sidecar, path = json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
+)
+
+```
+
+#####.Json sidecar (Manual)
+```{r}
+pwalk(
+  list(
+    manual_file = qdafiles_HC$manual_file,
+    sub = qdafiles_HC$sub,
+    ses_id = qdafiles_HC$ses_id,
+    out_dir = qdafiles_HC$out_dir
+  ),
+  function(manual_file, sub, ses_id, out_dir) {
+    blood_df <- read_tsv(manual_file, show_col_types = FALSE)
+
+    blood_df$whole_blood_radioactivity <- unit_convert(
+      blood_df$whole_blood_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+
+    blood_df$plasma_radioactivity <- unit_convert(
+      blood_df$plasma_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+
+    json_filename <- glue("sub-{sub}_{ses_id}_recording-manual_blood.json")
+    json_path <- file.path(out_dir, json_filename)
+
+    manual_sidecar <- list(
+      PlasmaAvail = TRUE,
+      WholeBloodAvail = TRUE,
+      MetaboliteAvail = TRUE,
+      MetaboliteMethod = "HPLC",
+      MetaboliteRecoveryCorrectionApplied = FALSE,
+      DispersionCorrected = FALSE,
+      time = list(
+        Description = "Time in relation to time zero defined in _pet.json",
+        Units = "s"
+      ),
+      plasma_radioactivity = list(
+        Description = "Radioactivity in plasma samples.",
+        Units = "Bq/mL"
+      ),
+      metabolite_parent_fraction = list(
+        Description = "Parent fraction of Radio tracer",
+        Units = "arbitrary"
+      ),
+      whole_blood_radioactivity = list(
+        Description = "Radioactivity in whole blood samples. Measured using Allogg autosampler.",
+        Units = "Bq/mL"
+      )
+    )
+
+    write_json(manual_sidecar, path = json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
+)
+```
+
+## Blood unit fixing
+
+**Note:** We find that the blood units seem to be out. It may be that the TACs are actually in the wrong units, but for now we have corrected the blood data. We have done so by multiplying by 37.
+
+
+NOTE: NEVER RUN THIS AGAIN!!!
+
+[x] Done
+
+```{r, eval=FALSE}
+autoblood <- list.files("../../BIDS/KIH11004/", recursive=T, pattern="autosampler_blood.tsv", full.names = T)
+manblood <- list.files("../../BIDS/KIH11004/", recursive=T, pattern="manual_blood.tsv", full.names = T)
+
+fixmanblood <- function(filename) {
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(manblood)) {
+  print(i)
+  fixmanblood(manblood[i])
+}
+
+
+fixautoblood <- function(filename) {
+  
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  # dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(autoblood)) {
+  print(i)
+  fixautoblood(autoblood[i])
+}
+```
+
+#BIDS APPS FOR PET - Processing
+##MR Processing
+###sMRIPrep
+Ran this in Terminal (enter correct environment first: conda activate PETBIDS)
+```{bash, eval=FALSE}
+smriprep-docker \
+  --fs-license-file /home/jan-erik/Documents/FreeSurfer/license.txt \
+  /home/jan-erik/Repositories/BIDS/KIH11004 \
+  /home/jan-erik/Repositories/BIDS/KIH11004/derivatives \
+  participant \
+  --nprocs 32 \
+  --omp-nthreads 16 \
+  --mem-gb 90 \
+  --output-spaces MNI152NLin2009cAsym:res-1 anat
+```
+
+###petprep_hmc
+```{r}
+system("rm --r ../../BIDS/KIH11004/sub-25/ses-1/")
+```
+
+####Fixing Folder tree stucture for the PET-files in order to use petprep_hmc
+```{r}
+
+base_dir <- "/home/jan-erik/Repositories/BIDS/KIH11004"
+
+subject_dirs <- list.dirs(base_dir, recursive = FALSE, full.names = TRUE)
+subject_dirs <- subject_dirs[grepl("^sub-\\d+", basename(subject_dirs))]
+
+for (subj in subject_dirs) {
+  pet_dir <- file.path(subj, "pet")
+  if (!dir_exists(pet_dir)) next
+  
+  session_dirs <- list.dirs(pet_dir, recurse = FALSE, full.names = TRUE)
+  
+  for (ses_path in session_dirs) {
+    ses_name <- basename(ses_path)  # t.ex. "ses-1"
+    
+    new_pet_dir <- file.path(subj, ses_name, "pet")
+    dir_create(new_pet_dir, recursive = TRUE)
+    
+    files_to_move <- dir_ls(ses_path, type = "file", recurse = FALSE)
+    file_move(files_to_move, file.path(new_pet_dir, basename(files_to_move)))
+    
+    if (length(dir_ls(ses_path)) == 0) {
+      dir_delete(ses_path)
+    }
+  }
+  
+  if (length(dir_ls(pet_dir)) == 0) {
+    dir_delete(pet_dir)
+    message(glue::glue("Removed empty folder: {pet_dir}"))
+  }
+}
+
+```
+
+#####run petprep_hmc
+```{bash}
+docker run --rm \
+-v /home/jan-erik/Repositories/BIDS/KIH11004:/data/input \
+-v /home/jan-erik/Repositories/BIDS/KIH11004/derivatives/petprep_hmc:/data/output \
+-v /home/jan-erik/Documents/FreeSurfer/license.txt:/opt/freesurfer/license.txt \
+martinnoergaard/petprep_hmc:latest \
+/data/input /data/output participant --participant_label sub-25 
+```
+
+
+
+###petprep_extract_tacs (using petprep_hmc files)
+```{bash}
+docker run -a stderr -a stdout --rm \
+-v /home/jan-erik/Repositories/BIDS/KIH11004:/bids_dir \
+-v /home/jan-erik/Repositories/BIDS/KIH11004/derivatives/petprep_extract_tacs:/output_dir \
+-v $PWD:/workdir -v /home/jan-erik/Repositories/petprep_extract_tacs:/petprep_extract_tacs \
+-v /home/jan-erik/Documents/FreeSurfer/license.txt:/opt/freesurfer/license.txt \
+--platform linux/amd64 \
+petprep_extract_tacs \
+/bids_dir /output_dir participant --participant_label sub-25 --n_procs 10 --gtm  --petprep_hmc 
+```
+
+#Blood processing
+## See "Modelling.Rmd"
+
+
+```{r}
+extra_info <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/Subjects_PET_MR_info.xlsx") %>%
+  rename(
+    acronym = Acronym,
+    Age = Age,
+    MBq = `PBR28, Inj. Activity (MBq)`
+  ) %>%
+  mutate(acronym = tolower(acronym)) %>%
+  filter(acronym %in% tolower(qdafiles_HC$acronym)) %>%  
+  select(acronym, Age, MBq)
+
+
+sub_demog_pet_extended <- sub_demog %>%
+  filter(acronym %in% qdafiles_HC$acronym) %>%
+  left_join(qdafiles_HC %>% select(acronym, ses), by = "acronym") %>%
+  left_join(extra_info, by = "acronym", suffix = c("", ".new")) %>%
+  mutate(
+    pet_date = as.Date(pet_date),
+    weight = NA,
+    comments = NA,
+    male1_female2 = NA,
+    MBq = coalesce(MBq, MBq.new),  
+    Age = round(Age)
+  ) %>%
+  select(
+    sub,
+    acronym,
+    study,
+    ses,
+    pet_date,
+    weight,
+    MBq,
+    comments,
+    genotype,
+    male1_female2,
+    Age
+  ) %>% 
+  rename(Genotype = genotype)
+
+write_csv(sub_demog_pet_extended, "/home/jan-erik/Repositories/PBR282BIDS/DerivedData/sub_demog_pet_extended_KIH11004.csv")
+```
+
+
+# Combined Demographic of data from the two studies used for modelling
+```{r}
+library(writexl)
+demog_11004 <- read.csv("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/sub_demog_pet_extended_KIH11004.csv")
+demog_12001 <- read.csv("/home/jan-erik/Repositories/PBR282BIDS/DerivedData/sub_demog_pet_extended_KIH12001.csv")
+
+PBR28_combined_demograph <- dplyr::bind_rows(demog_11004, demog_12001)
+
+write_xlsx(PBR28_combined_demograph, "/home/jan-erik/Repositories/PBR282BIDS/RawData/PBR28_combined_demograph_KIH11004_KIH12001.xlsx")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

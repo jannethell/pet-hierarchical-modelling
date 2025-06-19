@@ -1,0 +1,801 @@
+---
+title: "Extract PET Study Data"
+output: html_document
+---
+
+#Load packages
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(janitor)
+library(lubridate)
+library(readr)
+library(stringr)
+library(fs)
+library(glue)
+library(purrr)
+library(jsonlite)
+library(kinfitr)
+library(bloodstream)
+library(furrr)
+```
+
+#Structure
+##Load given data (datasets)
+```{r}
+dataSet <- list.files(
+  path = "/mnt/alfred/Atlas_Images/KIH12001/",
+  pattern = "^[a-zA-Z]{4}$",
+  full.names = TRUE
+)
+```
+
+###Identify Real Subjects
+```{r}
+real_subjects <- vector()
+
+for (folder in dataSet) {
+  if (file.exists(file.path(folder, "studyDB.mat"))) {
+    real_subjects <- c(real_subjects, folder)
+  }
+}
+
+real_subjects_names <- basename(real_subjects)
+
+sub_mapping <- tibble(
+  acronym = sort(unique(tolower(real_subjects_names))),
+  sub = sprintf("%02d", 1:length(acronym))
+)
+
+# Save for reference
+write_csv(sub_mapping, "../DerivedData/sub_mapping_KIH12001.csv")
+
+```
+
+###Extract Information from Study Variables
+```{r}
+extract_info <- function(folder) {
+file_path <- file.path(folder, "study_variables.txt")
+  
+  if (!file.exists(file_path)) {
+    return(tibble(Subject_Folder = basename(folder), DP1 = NA, DP2 = NA, MR = NA))
+  }
+  
+  lines <- readLines(file_path)
+  
+  dp1 <- str_extract(str_subset(lines, "dynpet1"), "\\S+\\.v$")
+  dp2 <- str_extract(str_subset(lines, "dynpet2"), "\\S+\\.v$")
+  
+  mr_date <- str_extract(str_subset(lines, "mr_date"), "\\d{8}")  
+  
+  tibble(
+    Subject_Folder = basename(folder),
+    DP1 = ifelse(length(dp1) > 0, dp1, NA),
+    DP2 = ifelse(length(dp2) > 0, dp2, NA),
+    MR = ifelse(length(mr_date) > 0, mr_date, NA)
+  )
+}
+
+subject_data <- map_dfr(real_subjects, extract_info)
+print(subject_data)
+```
+
+###Demographic File from All_PBR28.xlsx
+```{r create big demog}
+all_raw <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/All_PBR28.xlsx") %>% clean_names()
+
+sub_demog <- all_raw %>%
+  filter(!is.na(acronym), !is.na(study)) %>%
+  left_join(sub_mapping) %>%
+  transmute(
+    sub,      
+    acronym,         
+    study,
+    patient_description = cfs_allergi_ra_pope,
+    hc_pat = hc_pat
+  )
+
+write_csv(sub_demog, "../DerivedData/sub_demog_KIH12001.csv")
+```
+
+
+####PET Specific Demog
+```{r create PET demog}
+sub_demog_pet <- all_raw %>%
+  filter(!is.na(acronym), !is.na(study)) %>%
+  left_join(sub_mapping) %>%
+  transmute(
+    sub,
+    acronym,
+    study,
+    ses = pet1_pet2_pet3,
+    pet_date = pet_date, 
+    weight = weight_kg,
+    MBq = m_bq,
+    comments = comments
+  )
+
+write_csv(sub_demog_pet, "../DerivedData/sub_demog_pet_KIH12001.csv")
+```
+
+
+```{r}
+
+extrainfo_genotype_sex <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/PBR28_database_demograph_genotype.xlsx") %>%
+  rename(acronym = Subjects) %>%
+  distinct(acronym, Genotype, male1_female2, .keep_all = FALSE)
+
+extra_demog2 <- read_excel("/home/jan-erik/Repositories/PBR282BIDS/RawData/PET_group_gene_EVF_170215.xlsx") %>%
+  rename(acronym = Acronym) %>% 
+  mutate(
+    male1_female2 = case_when(
+      Kön == "Man" ~ 1,
+      Kön == "Kvinna" ~ 2,
+      TRUE ~ NA_real_
+    ),
+    
+    Genotype = case_when(
+      Genotyp == "A/A" ~ "LAB",
+      Genotyp == "A/G" ~ "MAB",
+      Genotyp == "G/G" ~ "HAB",
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  select(acronym, Age = Ålder, Genotype, male1_female2, PET1, PET2)
+
+extra_combined <- full_join(extrainfo_genotype_sex, extra_demog2, by = "acronym", suffix = c("", ".new")) %>%
+  mutate(
+    Genotype = coalesce(Genotype, Genotype.new),
+    male1_female2 = coalesce(male1_female2, male1_female2.new),
+    Age = Age,
+
+    PET1 = suppressWarnings(case_when(
+      is.na(PET1) ~ NA_Date_,
+      !is.na(as.numeric(PET1)) ~ as.Date(as.numeric(PET1), origin = "1899-12-30"),
+      TRUE ~ parse_date_time(PET1, orders = c("mdy", "m/d/y"))
+    )),
+    PET2 = suppressWarnings(case_when(
+      is.na(PET2) ~ NA_Date_,
+      !is.na(as.numeric(PET2)) ~ as.Date(as.numeric(PET2), origin = "1899-12-30"),
+      TRUE ~ parse_date_time(PET2, orders = c("mdy", "m/d/y"))
+    ))
+  ) %>%
+  select(acronym, Genotype, male1_female2, Age, PET1, PET2)
+
+
+sub_demog_pet_extended <- sub_demog_pet %>%
+  filter(study == "KIH12001") %>%
+  left_join(extra_combined, by = "acronym") %>%
+  mutate(
+    sub = str_pad(as.character(sub), width = 2, pad = "0"),
+    pet_date = as.Date(pet_date),
+    pet_date = case_when(
+      is.na(pet_date) & ses == 1 & !is.na(PET1) ~ as.Date(PET1),
+      is.na(pet_date) & ses == 2 & !is.na(PET2) ~ as.Date(PET2),
+      TRUE ~ pet_date
+    )
+  ) %>%
+  select(sub, acronym, study, ses, pet_date, weight, MBq, comments,
+         Genotype, male1_female2, Age)
+
+
+write_csv(sub_demog_pet_extended,"/home/jan-erik/Repositories/PBR282BIDS/DerivedData/sub_demog_pet_extended_KIH12001.csv")
+```
+
+####MR Specific Demog
+```{r create MR demog}
+subject_data_clean <- subject_data %>%
+  transmute(
+    acronym = tolower(Subject_Folder),
+    mr_date = MR
+  )
+
+full_subject_list <- all_raw %>%
+  filter(!is.na(acronym), !is.na(study)) %>%
+  select(acronym, study) %>%
+  distinct()
+
+sub_demog_mr <- full_subject_list %>%
+  left_join(sub_mapping) %>%
+  left_join(subject_data_clean) %>% 
+  select(sub, acronym, study, mr_date) %>%
+  arrange(sub)
+
+write_csv(sub_demog_mr, "../DerivedData/sub_demog_mr_KIH12001.csv")
+```
+
+
+####Create Sub-XX-folder structure (including anat and pet folders inside each sub-XX-folder) 
+```{r, eval=FALSE}
+bids_base <- "../../BIDS/KIH12001/"
+sub_mapping %>%
+  pull(sub) %>%
+  paste0("sub-", .) %>%
+  walk(function(subfolder) {
+    dir_create(file.path(bids_base, subfolder, "anat"), recurse = TRUE)
+    dir_create(file.path(bids_base, subfolder, "pet"), recurse = TRUE)
+  })
+```
+
+
+#MR
+
+```{r, eval=FALSE}
+mr_sequences = sub_demog_mr %>% 
+  group_by(sub) %>% 
+  mutate(
+    dicom_dir = glue("/mnt/alfred/Atlas_Images/KIH12001/{acronym}/raw/mr_dicom/"),
+    output_dir = glue("../../BIDS/{study}/{sub}/anat/")
+  ) 
+
+  saveRDS(mr_sequences, "../DerivedData/mr_sequences_KIH12001.rds")
+  
+```
+
+
+##Filter for T1w MR subjects
+```{r}
+mr_sequences <- readRDS("../DerivedData/mr_sequences_KIH12001.rds") 
+  
+mr_sequences_t1 <- mr_sequences %>%
+  mutate(
+    t1w = any(str_detect(dir(dicom_dir, full.names = FALSE, recursive = TRUE), regex("t1")))
+  ) %>% 
+  ungroup() %>% 
+  filter(t1w)
+```
+
+
+
+##Adding .dcm to files without it
+```{r add-dcm-extension-generalised, message=TRUE}
+base_path <- "/home/jan-erik/Repositories/BIDS_Sourcedata"
+
+dicom_roots <- sub_demog_mr %>%
+  filter(study == "KIH12001") %>%
+  mutate(
+    dicom_root = file.path(base_path, study, acronym, "raw", "mr_dicom")
+  ) %>%
+  pull(dicom_root)
+
+add_dcm_extension_recursive <- function(path) {
+  files <- fs::dir_ls(path, recurse = TRUE, type = "file")
+  files_no_ext <- files[!str_detect(path_ext(files), "\\w+")]
+
+  if (length(files_no_ext) > 0) {
+    message(glue("{length(files_no_ext)} files without extension in: {path}"))
+
+    walk(files_no_ext, function(f) {
+      new_name <- paste0(f, ".dcm")
+      file_move(f, new_name)
+    })
+
+    message("Added extensions.")
+  } else {
+    message(glue("No extensionless files in: {path}"))
+  }
+}
+
+walk(dicom_roots, add_dcm_extension_recursive)
+```
+
+##Find T1 folder for every subject
+```{r find-t1-folder-generalised, message=TRUE}
+base_path_KIH12001 <- "/mnt/alfred/Atlas_Images" 
+
+mr_paths <- sub_demog_mr %>%
+  filter(study == "KIH12001") %>%
+  mutate(
+    dicom_root = file.path(base_path_KIH12001, study, acronym, "raw", "mr_dicom")
+  ) %>%
+  rowwise() %>%
+  mutate(
+    t1_folder = list(
+      fs::dir_ls(dicom_root, recurse = TRUE, type = "directory") %>%
+        keep(~ str_detect(.x, regex("t1|T1|DICOM", ignore_case = FALSE))) %>%
+        head(1)
+    ),
+    t1_folder = ifelse(length(t1_folder) == 0, NA, t1_folder)
+  ) %>%
+  ungroup()
+```
+
+#Dicom to Nifty
+##dcm2niix
+```{r, message=TRUE, eval = F}
+checkLines <- F
+
+mr_paths %>%
+  filter(study == "KIH12001") %>%
+  filter(!is.na(t1_folder)) %>%
+  mutate(
+    output_dir = file.path("/home/jan-erik/Repositories/BIDS", study, paste0("sub-", sub), "anat"),
+    out_name = paste0("sub-", sub, "_T1w")
+  ) %>%
+  pwalk(function(t1_folder, output_dir, out_name, sub, ...) {
+    message(glue::glue("Converting T1 for {sub}..."))
+
+    command <- paste0("dcm2niix ", 
+      "-z ", "y ",              # gzip compression
+      "-b ", "y ",              # BIDS sidecar (JSON)
+      "-ba ", "n ",             # no anonymisation
+      "-o ", output_dir, " ",   # output goes to pre-created anat folder
+      "-f ", out_name, " ",     # correct BIDS name
+      t1_folder                 # input DICOM folder
+    )
+    
+    if(checkLines==T) { command <- paste0("echo ", command) }
+    
+    system(command)
+
+    message(glue::glue("Klar: {sub} → {output_dir}/{out_name}.nii.gz + .json"))
+  })
+```
+
+
+#Processing
+##MR Processing
+```{bash, eval=FALSE}
+smriprep-docker --fs-license-file /home/jan-erik/Documents/FreeSurfer/license.txt /home/jan-erik/Repositories/BIDS/KIH12001 /home/jan-erik/Repositories/BIDS/KIH12001/derivatives participant
+```
+
+###ecatpet2bids
+```{r, message=TRUE}
+checkLines <- T
+
+subject_data_petlong <- subject_data %>%
+  pivot_longer(cols = c(DP1, DP2), names_to = "ses", values_to = "v_file") %>%
+  mutate(
+    ses = str_remove(ses, "DP"),
+    ses = as.integer(ses)
+  ) %>%
+  filter(!is.na(v_file)) %>%
+  rename(acronym = Subject_Folder) %>% 
+  left_join(sub_mapping) %>%
+  select(sub, ses, v_file) %>% 
+  mutate(ses = as.character(ses))
+
+sub_demog_pet <- sub_demog_pet %>%
+  left_join(subject_data_petlong) %>%
+  filter(!is.na(v_file)) 
+
+sub_demog_pet <- sub_demog_pet %>%
+  mutate(
+    input_path = file.path("/home/jan-erik/Repositories/BIDS_Sourcedata", study, acronym, "raw", "pet_ecat7", v_file),
+    input_path_docker = file.path("/mnt/Repositories/BIDS_Sourcedata", study, acronym, "raw", "pet_ecat7", v_file),
+    output_dir = file.path("/home/jan-erik/Repositories/BIDS", study, paste0("sub-", sub), "pet", paste0("ses-", ses)),
+    output_dir_docker = file.path("/mnt/Repositories/BIDS", study, paste0("sub-", sub), "pet", paste0("ses-", ses)),
+    out_name = paste0("sub-", sub, "_ses-", ses, "_pet.nii.gz")
+  )
+
+script_file <- "ecatpet2bids_script.sh"
+writeLines("#!/bin/bash", script_file)
+
+sub_demog_pet %>%
+  pwalk(function(input_path_docker, output_dir_docker, out_name, output_dir, ...) {
+    
+    cmd <- glue('docker run --rm -v /home/jan-erik/Repositories:/mnt/Repositories pet2bids_container /bin/bash -c \"\n
+    source /opt/conda/etc/profile.d/conda.sh && \\\\\n
+    conda activate PETBIDS && \\\\\n
+    ecatpet2bids {input_path_docker} --convert -n {file.path(output_dir_docker, out_name)}
+\"')
+
+    if (checkLines) cmd <- paste("echo", cmd)
+    
+    if(file.exists( file.path(output_dir, out_name)) ) {
+      
+      print(cmd)
+      print("Not executing: file already exists")
+      
+    } else {
+      
+      print(cmd)
+      system(cmd)
+      
+    }
+  })
+```
+
+## .QDA/.qda-converter (blood data)
+```{r}
+blood_data <- sub_demog %>% 
+  group_by(sub) %>% 
+  transmute(
+    acronym,
+    study,
+    blood_dir = glue("/mnt/alfred/Atlas_Images/{study}/{acronym}/modelling/data/") 
+  )
+
+qda_roots <- blood_data %>%
+  filter(study == "KIH12001") %>%
+  mutate(
+    qda_root = file.path(base_path_KIH12001, study, acronym, "modelling", "data")
+  ) %>% 
+  pull(qda_root)
+
+#funktion för att köra alla .qda filer genom funktionen "qda_jailbreak.R"
+run_qda_jailbreak_recursive <- function(path) {
+  qda_files <- fs::dir_ls(path, recurse = T, type = "file")
+  
+  # Välj ut de filer med .qda/.QDA-ändelse
+  files_with_qda_QDA <- qda_files[str_detect(path_ext(qda_files), "(?i)qda")]
+  
+  
+    if(length(files_with_qda_QDA) > 0) {
+    # Source the jailbreak function
+    source("qda_jailbreak.R")
+    
+    # Apply the function to each QDA file
+    purrr::walk(files_with_qda_QDA, ~qda_jailbreak(.x, outputdir = "../../BIDS_Sourcedata/KIH12001/blood/"))
+    
+      message("qda_jailbreak.R executed on all .qda/.QDA files")
+  } else {
+    message(glue("No .QDA/.qda files found in: {path}"))
+  }
+}
+
+
+purrr::walk(qda_roots, run_qda_jailbreak_recursive)
+```
+
+```{r}
+mr_sequences_t1 <- mr_sequences %>%
+  mutate(
+    t1w = any(str_detect(dir(dicom_dir, full.names = FALSE, recursive = TRUE), regex("t1")))
+  ) %>% 
+  ungroup() %>% 
+  filter(t1w)
+```
+
+#Extracting blood data
+```{r}
+qdafiles <- tibble(
+  fullfilename = list.files(
+    path = "/home/jan-erik/Repositories/BIDS_Sourcedata/KIH12001/blood",  
+    pattern = "qdaconverted.csv", 
+    recursive = TRUE, full.names = TRUE)
+) %>%
+  mutate(
+    filename = basename(fullfilename),
+    filepath = dirname(fullfilename),
+    acronym = str_match(filename, "([a-z]*)_\\d")[, 2],
+    ses = str_match(filename, "[a-z]*_(\\d)")[, 2]
+  ) %>%
+  mutate(
+    pf_fullfilename = map2_chr(acronym, ses, ~ {
+      search_dir <- "/mnt/alfred/Atlas_Images/KIH12001"
+      id <- paste0(.x, "_", .y)
+      files <- list.files(
+        path = search_dir,
+        pattern = paste0("^", id, "_parent_fraction\\.txt$"),
+        full.names = TRUE,
+        recursive = TRUE,
+        ignore.case = TRUE
+      )
+      if (length(files) == 0) NA_character_ else files[1]
+    })
+  ) %>%
+  left_join(sub_mapping, by = "acronym") %>%
+  mutate(
+    ses_id = glue("ses-{ses}"),
+    out_dir = file.path("/home/jan-erik/Repositories/BIDS/KIH12001",glue("sub-{sub}"), ses_id, "pet"),    
+    auto_file = file.path(out_dir, glue("sub-{sub}_{ses_id}_recording-autosampler_blood.tsv")),
+    manual_file = file.path(out_dir, glue("sub-{sub}_{ses_id}_recording-manual_blood.tsv"))
+  )
+```
+
+##AUTO + MANUAL + PF
+```{r}
+checkLines <- F
+
+#AUTO
+extract_auto_data <- function(fullfilename) {
+  read_csv(fullfilename, show_col_types = FALSE) %>%
+    select(`ABSS sec`, `ABSS count`, `Cbl (uncorr)`) %>%
+    filter(!is.na(`ABSS count`)) %>% 
+    transmute(
+      time = `ABSS sec`,
+      whole_blood_radioactivity = `Cbl (uncorr)` 
+    )
+}
+
+#MANUAL
+extract_manual_data <- function(fullfilename) {
+  read_csv(fullfilename, show_col_types = FALSE) %>% 
+  select(`HK_sa_min`, `HK_sa_sec`, `HK_Cbl`, `HK_Cpl`) %>% 
+  filter(!is.na(`HK_Cpl`)) %>% 
+    transmute(
+      time = `HK_sa_min`*60 + `HK_sa_sec`,
+      whole_blood_radioactivity = `HK_Cbl`,
+      plasma_radioactivity = `HK_Cpl`
+    )
+}
+
+#PF
+extract_pf_data <- function(pf_filename) {
+  read_delim(pf_filename, delim = "\t", show_col_types = FALSE) %>% 
+    rename(time = 'Time[sec]', metabolite_parent_fraction = 'Parent_fraction[1/1]') 
+}  
+    
+  
+#Merge extract_manual_data + extract_pf_data with left_join as it should match with time 
+extract_combined_manual <- function(fullfilename, pf_filename) {
+  manual <- extract_manual_data(fullfilename)
+  pf <- extract_pf_data(pf_filename)
+  left_join(manual, pf, by = "time")
+}
+
+pmap(
+  list(
+    fullfilename = qdafiles$fullfilename,
+    pf_fullfilename = qdafiles$pf_fullfilename,
+    auto_file = qdafiles$auto_file,
+    manual_file = qdafiles$manual_file,
+    out_dir = qdafiles$out_dir
+  ),
+
+  function(fullfilename, pf_fullfilename, auto_file, manual_file, out_dir) {
+    
+  if (checkLines) {
+      message(glue::glue("  [AUTO]   {auto_file}"))
+      message(glue::glue("  [MANUAL] {manual_file}"))
+    } else {
+      
+      fs::dir_create(out_dir)
+      auto_df <- extract_auto_data(fullfilename)
+      readr::write_tsv(auto_df, auto_file)
+      
+      manual_df <- extract_combined_manual(fullfilename, pf_fullfilename)
+      readr::write_tsv(manual_df, manual_file)
+    }
+  }
+)
+```
+
+
+###.Json sidecar (Auto)
+```{r}
+pwalk(
+  list(
+    autosampler_file = qdafiles$auto_file,
+    sub = qdafiles$sub,
+    ses_id = qdafiles$ses_id,
+    out_dir = qdafiles$out_dir
+  ),
+  function(autosampler_file, sub, ses_id, out_dir) {
+    
+    blood_df <- read_tsv(autosampler_file, show_col_types = FALSE)
+ 
+    blood_df$whole_blood_radioactivity <- unit_convert(
+      values = blood_df$whole_blood_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+    
+    json_filename <- glue("sub-{sub}_{ses_id}_recording-autosampler_blood.json")
+    json_path <- file.path(out_dir, json_filename)
+    
+    auto_sidecar <- list(
+      PlasmaAvail = FALSE,
+      MetaboliteAvail = FALSE,
+      WholeBloodAvail = TRUE,
+      DispersionCorrected = FALSE,
+      DispersionConstant = 2.5991,
+      time = list(
+        Description = "Time in relation to time zero defined by the _pet.json",
+        Units = "s"
+      ),
+      whole_blood_radioactivity = list(
+        Description = "Radioactivity in whole blood samples. Measured using Allogg autosampler.",
+        Units = "Bq/mL"
+      )
+    )
+    write_json(auto_sidecar, path = json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
+)
+
+```
+
+###.Json sidecar (Manual)
+```{r}
+pwalk(
+  list(
+    manual_file = qdafiles$manual_file,
+    sub = qdafiles$sub,
+    ses_id = qdafiles$ses_id,
+    out_dir = qdafiles$out_dir
+  ),
+  function(manual_file, sub, ses_id, out_dir) {
+    blood_df <- read_tsv(manual_file, show_col_types = FALSE)
+
+    blood_df$whole_blood_radioactivity <- unit_convert(
+      blood_df$whole_blood_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+
+    blood_df$plasma_radioactivity <- unit_convert(
+      blood_df$plasma_radioactivity,
+      from_units = "nCi",
+      to_units = "Bq"
+    )
+
+    json_filename <- glue("sub-{sub}_{ses_id}_recording-manual_blood.json")
+    json_path <- file.path(out_dir, json_filename)
+
+    manual_sidecar <- list(
+      PlasmaAvail = TRUE,
+      WholeBloodAvail = TRUE,
+      MetaboliteAvail = TRUE,
+      MetaboliteMethod = "HPLC",
+      MetaboliteRecoveryCorrectionApplied = FALSE,
+      DispersionCorrected = FALSE,
+      time = list(
+        Description = "Time in relation to time zero defined in _pet.json",
+        Units = "s"
+      ),
+      plasma_radioactivity = list(
+        Description = "Radioactivity in plasma samples.",
+        Units = "Bq/mL"
+      ),
+      metabolite_parent_fraction = list(
+        Description = "Parent fraction of Radio tracer",
+        Units = "arbitrary"
+      ),
+      whole_blood_radioactivity = list(
+        Description = "Radioactivity in whole blood samples. Measured using Allogg autosampler.",
+        Units = "Bq/mL"
+      )
+    )
+
+    write_json(manual_sidecar, path = json_path, pretty = TRUE, auto_unbox = TRUE)
+  }
+)
+```
+
+## Blood unit fixing
+
+**Note:** We find that the blood units seem to be out. It may be that the TACs are actually in the wrong units, but for now we have corrected the blood data. We have done so by multiplying by 37.
+
+
+NOTE: NEVER RUN THIS AGAIN!!!
+
+[x] Done
+
+```{r, eval=FALSE}
+autoblood <- list.files("../../BIDS/KIH12001/", recursive=T, pattern="autosampler_blood.tsv", full.names = T)
+manblood <- list.files("../../BIDS/KIH12001/", recursive=T, pattern="manual_blood.tsv", full.names = T)
+
+fixmanblood <- function(filename) {
+  
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(manblood)) {
+  print(i)
+  fixmanblood(manblood[i])
+}
+
+
+fixautoblood <- function(filename) {
+  
+  dat <- read_tsv(filename)
+  dat$whole_blood_radioactivity <- dat$whole_blood_radioactivity*37
+  # dat$plasma_radioactivity <- dat$plasma_radioactivity*37
+  
+  write_tsv(dat, filename)
+}
+
+for(i in 1:length(autoblood)) {
+  print(i)
+  fixautoblood(autoblood[i])
+}
+```
+
+
+#HMC
+##Fixing Folder tree stucture for the PET-files in order to use petprep_hmc
+```{r}
+base_dir <- "/home/jan-erik/Repositories/BIDS/KIH12001" 
+
+subject_dirs <- list.dirs(base_dir, recursive = FALSE, full.names = TRUE)
+subject_dirs <- subject_dirs[grepl("sub-\\d+", basename(subject_dirs))]
+
+for (subj in subject_dirs) {
+  pet_path <- file.path(subj, "pet")
+  
+  if (!dir.exists(pet_path)) next
+  
+  session_dirs <- list.dirs(pet_path, recursive = FALSE, full.names = TRUE)
+  
+  for (ses_path in session_dirs) {
+    ses_name <- basename(ses_path)
+    files <- list.files(ses_path, full.names = TRUE)
+    
+    new_dir <- file.path(subj, ses_name, "pet")
+    dir.create(new_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    for (file in files) {
+      new_file <- file.path(new_dir, basename(file))
+      file.rename(file, new_file)
+    }
+    
+    if (length(list.files(ses_path)) == 0) {
+      dir_delete(ses_path, recursive = TRUE)
+    }
+  }
+}
+
+subject_dirs <- list.dirs(base_dir, recursive = FALSE, full.names = TRUE)
+subject_dirs <- subject_dirs[grepl("sub-\\d+", basename(subject_dirs))]
+
+for (subj in subject_dirs) {
+  pet_path <- file.path(subj, "pet")
+  
+  if (dir.exists(pet_path)) {
+    if (length(list.files(pet_path, recursive = TRUE)) == 0) {
+      unlink(pet_path, recursive = TRUE)
+      message(sprintf("Removed empty folder: %s", pet_path))
+    }
+  }
+}
+```
+
+###petprep_hmc
+```{bash}
+rm -rf /home/jan-erik/Repositories/BIDS/KIH12001/sub-03/ses-2 
+
+docker run -it --rm \
+-v /home/jan-erik/Repositories/BIDS/KIH12001:/data/input \
+-v /home/jan-erik/Repositories/BIDS/KIH12001/derivatives/petprep_hmc:/data/output \
+-v /home/jan-erik/Documents/FreeSurfer/license.txt:/opt/freesurfer/license.txt \
+martinnoergaard/petprep_hmc:latest \
+/data/input /data/output group --n_procs 10
+```
+
+#TAC (using petprep_hmc files)
+```{bash}
+docker run -a stderr -a stdout --rm \
+-v /home/jan-erik/Repositories/BIDS/KIH12001:/bids_dir \
+-v /home/jan-erik/Repositories/BIDS/KIH12001/derivatives/petprep_extract_tacs:/output_dir \
+-v $PWD:/workdir -v /home/jan-erik/Repositories/petprep_extract_tacs:/petprep_extract_tacs \
+-v /home/jan-erik/Documents/FreeSurfer/license.txt:/opt/freesurfer/license.txt \
+--platform linux/amd64 \
+petprep_extract_tacs \
+/bids_dir /output_dir participant --participant_label sub-03 --n_procs 10 --gtm  --petprep_hmc
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
